@@ -1,4 +1,4 @@
-from lstm2 import train
+from lstm3 import train
 
 from config import filenames, folders
 
@@ -10,28 +10,38 @@ import os
 device = 'cuda'
 
 config = {
-    'model_name': 'LSTM_2',
-    'feature': 'more-dropouts',
-    'max_len': 48,
+    'model_name': 'LSTM_3',
+    'feature': 'testing-teacher-forcing',
+    # 'max_len': 48,
+    'max_len': 24,
     'min_freq_src': 4,
     'min_freq_trg': 4,
     
     'src_vocab_size': 29798,
     'trg_vocab_size': 21555,
 
-    'embedding_dim': 128,
-    'hidden_size': 256,
-    'num_layers': 3,
+    # 'embedding_dim': 128,
+    # 'hidden_size': 256,
+    # 'num_layers': 3,
+
+    'embedding_dim': 64,
+    'hidden_size': 128,
+    'num_layers': 2,
 
     'num_epochs': 15,
     'weight_decay': 1e-5,
     'label_smoothing': 0.1,
-    'dropout': 0.15,
+
+    'dropout_enc': 0.1,
+    'dropout_dec': 0.1,
+    'dropout_emb': 0.1,
+    'dropout_attention': 0.1,
 
     'learning_rate': 1e-3,
     'gamma': 0.2,
-    'patience': 1,
-    'threshold': 5e-4
+    'patience': 2,
+    'threshold': 5e-4,
+    'batch_size': 128
 }
 
 def plot_losses(train_losses, val_losses):
@@ -49,6 +59,6 @@ def plot_losses(train_losses, val_losses):
 p = psutil.Process(os.getpid())
 p.nice(psutil.HIGH_PRIORITY_CLASS)  # Windows-specific
 
-train_losses, val_losses = train(config=config, filenames=filenames, folders=folders, use_wandb=True, device=device)
+train_losses, val_losses = train(config=config, filenames=filenames, folders=folders, use_wandb=False, device=device)
 
 plot_losses(train_losses, val_losses)
