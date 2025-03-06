@@ -28,6 +28,7 @@ class Tokenizer():
         self.sentences = sentences
 
 pattern_float = r"^-?\+?\d+\.?\,?\d*\+?-?$"
+# pattern_float = r"^-?\+?\d+\.?\,?\d*$"
 
 class Vocab():
     def __init__(self, filename, min_freq=2, specials=specials):
@@ -96,10 +97,11 @@ class Vocab():
                 nums_idxs.append(i)
             if i != 0 and idxs[i-1] == idxs[i]: continue 
             result.append(self.decode_idx(idx))
-        if has_num and src:
+        if has_num and src != None:
             nums_src = list(filter(lambda x: re.match(pattern_float, x), src))
+            # print(nums_src)
             for t, idx in enumerate(nums_idxs):
-                if len(nums_src) < t:
+                if len(nums_src) <= t:
                     break
                 result[idx] = nums_src[t]
         return list(filter(lambda word: not word in ignore, result))
@@ -165,6 +167,17 @@ class SubmissionDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.src[idx]
+
+class RawDataset(Dataset):
+    def __init__(self, filename):
+        self.src = Tokenizer(filename).sentences
+
+    def __len__(self):
+        return len(self.src)
+
+    def __getitem__(self, idx):
+        return self.src[idx]
+
 
 
 def collate_fn_submission(batch):

@@ -21,19 +21,23 @@ def eval_bleu(pred_filename, ref_filename):
     return bleu_score
 
 # no_unk = set(['<BOS>', '<EOS>', '<PAD>'])
-no_unk = set(['<BOS>', '<EOS>'])
+no_unk = set(['<BOS>', '<EOS>', '<NUM>'])
 
-def get_bleu(model, dataloader, vocab_trg, filenames, device='cuda'):
+def get_bleu(model, dataloader, vocab_trg, filenames, device='cuda', raw_dataset=None):
 
     pred_filename = filenames['test_pred']
     ref_filename = filenames['test_trg']
 
     with open(pred_filename, 'w', encoding='utf-8') as f_pred:
         with torch.no_grad():
-            for src, _ in tqdm(dataloader):
+            for batch_idx, (src, _) in enumerate(tqdm(dataloader)):
                 predictions = model.inference(src, max_len=None, device=device) # batch
                 for i in range(len(src)):
-                    pred_text = vocab_trg.decode(predictions[i], ignore=no_unk, src=src)
+                    t = None
+                    if raw_dataset:
+                        t = raw_dataset[batch_idx * dataloader.batch_size + i]
+                        # print(t)
+                    pred_text = vocab_trg.decode(predictions[i], ignore=no_unk, src=t)
                     f_pred.write(" ".join(pred_text) + '\n')
 
                 # for trg_seq in trg:
@@ -47,12 +51,16 @@ def get_bleu(model, dataloader, vocab_trg, filenames, device='cuda'):
     return bleu_score
 
 
-def make_submission(model, submission_loader, vocab_trg, filenames, device='cuda'):
+def make_submission(model, submission_loader, vocab_trg, filenames, device='cuda', raw_dataset=None):
     with open(filenames['submission_trg'], 'w', encoding='utf-8') as f_pred:
         with torch.no_grad():
-            for a in tqdm(submission_loader):
+            for batch_idx, a in enumerate(tqdm(submission_loader)):
                 predictions = model.inference(a, max_len=None, device=device) # batch
                 for i in range(len(a)):
-                    pred_text = vocab_trg.decode(predictions[i], ignore=no_unk)
+                    t = None
+                    if raw_dataset:
+                        t = raw_dataset[batch_idx * submission_loader.batch_size + i]
+                        # print(t)
+                    pred_text = vocab_trg.decode(predictions[i], ignore=no_unk, src=t)
                     f_pred.write(" ".join(pred_text) + '\n')
 

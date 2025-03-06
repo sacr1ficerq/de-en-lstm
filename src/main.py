@@ -11,27 +11,27 @@ device = 'cuda'
 
 config = {
     'model_name': 'LSTM_2',
-    'feature': 'new-vocab',
+    'feature': 'more-dropouts',
     'max_len': 48,
-    'min_freq_src': 5,
+    'min_freq_src': 4,
     'min_freq_trg': 4,
-
-    'src_vocab_size': 24991,
+    
+    'src_vocab_size': 29798,
     'trg_vocab_size': 21555,
 
     'embedding_dim': 128,
     'hidden_size': 256,
     'num_layers': 3,
 
-    'num_epochs': 18,
+    'num_epochs': 15,
     'weight_decay': 1e-5,
     'label_smoothing': 0.1,
-    'dropout': 0.25,
+    'dropout': 0.15,
 
     'learning_rate': 1e-3,
     'gamma': 0.2,
-    'patience': 0,
-    'threshold': 0.001
+    'patience': 1,
+    'threshold': 5e-4
 }
 
 def plot_losses(train_losses, val_losses):

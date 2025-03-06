@@ -77,12 +77,12 @@ def train(config, filenames, folders, device='cuda', use_wandb=False):
                                     filenames['test_trg'], 
                                     max_len=72, 
                                     device=device, 
-                                    sort_lengths=True)
+                                    sort_lengths=False)
 
     unk_idx, pad_idx, bos_idx, eos_idx = 0, 1, 2, 3
 
-    train_loader = TrainDataLoader(train_dataset, shuffle=True)
-    val_loader = TestDataLoader(val_dataset)
+    train_loader = TrainDataLoader(train_dataset, batch_size=128, shuffle=True)
+    val_loader = TestDataLoader(val_dataset, batch_size=256, shuffle=False)
 
     config['src_vocab_size'] = len(vocab_src)
     config['trg_vocab_size'] = len(vocab_trg)
@@ -115,7 +115,7 @@ def train(config, filenames, folders, device='cuda', use_wandb=False):
     train_losses = []
     val_losses = []
 
-    for epoch in range(config['num_epochs']):
+    for epoch in range(1, config['num_epochs']+1):
         train_loss, val_loss = train_epoch(model, optimizer, train_loader, val_loader, criterion, vocab_trg, scheduler)
         
         val_losses.append(train_loss)
@@ -129,11 +129,11 @@ def train(config, filenames, folders, device='cuda', use_wandb=False):
             if scheduler:
                 wandb.log({"lr": scheduler.get_last_lr()[0]})
 
-        if epoch > 5:
+        if epoch >= 4:
             checkpoint_path = f'lstm-save-{epoch}.pt'
             model.save(checkpoint_path, folders['weights'])
             # if use_wandb: wandb.save(checkpoint_path)
-            if epoch%3 == 0:
+            if epoch%4 == 0:
                 try:
                     bleu_score = get_bleu(model, val_loader, vocab_trg, filenames)
                     print(f"BLEU4: {bleu_score}")
@@ -141,7 +141,7 @@ def train(config, filenames, folders, device='cuda', use_wandb=False):
                 except:
                     print('wrong bleu function')
 
-        print(f"Epoch [{epoch+1}/{config['num_epochs']}]\tTrain Loss: {train_loss:.4f}\tVal Loss: {val_loss:.4f}")
+        print(f"Epoch [{epoch}/{config['num_epochs']}]\tTrain Loss: {train_loss:.4f}\tVal Loss: {val_loss:.4f}")
 
 
     model.train_loss = np.array(train_losses)
@@ -151,6 +151,8 @@ def train(config, filenames, folders, device='cuda', use_wandb=False):
     wandb.finish()
 
     return train_losses, val_losses
+
+unk_idx, pad_idx, bos_idx, eos_idx, num_idx = 0, 1, 2, 3, 4
 
 
 class LSTM_2(nn.Module):
@@ -162,6 +164,7 @@ class LSTM_2(nn.Module):
                  num_layers=None, 
                  dropout=None, 
                  config=None,
+                 pad_idx=pad_idx,
                  weights_filename=None):
         super().__init__()
 
@@ -185,8 +188,8 @@ class LSTM_2(nn.Module):
         self.num_layers = num_layers
         self.hidden_size = hidden_size
 
-        self.src_embedding = nn.Embedding(src_vocab_size, embedding_dim)
-        self.trg_embedding = nn.Embedding(trg_vocab_size, embedding_dim)
+        self.src_embedding = nn.Embedding(src_vocab_size, embedding_dim, padding_idx=pad_idx)
+        self.trg_embedding = nn.Embedding(trg_vocab_size, embedding_dim, padding_idx=pad_idx)
 
         self.encoder = nn.LSTM(embedding_dim, 
                                hidden_size, 
@@ -248,6 +251,7 @@ class LSTM_2(nn.Module):
         energy = energy.masked_fill(mask == 0, -1e10)
 
         attention = F.softmax(energy, dim=-1)
+
         context = torch.bmm(attention, encoder_outputs)
         combined = torch.cat([decoder_outputs, context], dim=2)
 
