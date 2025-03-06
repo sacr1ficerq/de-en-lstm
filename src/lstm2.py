@@ -1,12 +1,20 @@
+from submission import get_bleu
+from dataset import TranslationDataset, Vocab, TrainDataLoader, TestDataLoader
+
 import torch
 import torch.nn as nn
-from tqdm import tqdm
 import torch.nn.functional as F
+import torch.optim as optim
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+
+from tqdm import tqdm
+
 import numpy as np
-from submission import get_bleu
+
 import wandb
 
 unk_idx, pad_idx, bos_idx, eos_idx = 0, 1, 2, 3
+
 
 
 def train_epoch(model, optimizer, train_loader, val_loader, criterion, vocab_trg, scheduler):
@@ -33,7 +41,7 @@ def train_epoch(model, optimizer, train_loader, val_loader, criterion, vocab_trg
     total_val_loss = 0
 
     with torch.no_grad():
-        for src_seq, trg_seq in val_loader:
+        for src_seq, trg_seq in tqdm(val_loader):
             trg_input = trg_seq[:, :-1]
             trg_output = trg_seq[:, 1:]
 
@@ -44,49 +52,107 @@ def train_epoch(model, optimizer, train_loader, val_loader, criterion, vocab_trg
             loss = criterion(logits, trg_output)
             total_val_loss += loss.item()
 
-    if scheduler:
-        scheduler.step(avg_val_loss)
-    
-
     avg_val_loss = total_val_loss / len(val_loader)
     avg_train_loss = total_train_loss / len(train_loader)
 
+    if scheduler:
+        scheduler.step(avg_val_loss)
+
     return avg_train_loss, avg_val_loss
 
-def train(model, optimizer, num_epochs, train_loader, val_loader, criterion, vocab_trg, scheduler=None, use_wandb=False):
+def train(config, filenames, folders, device='cuda', use_wandb=False):
+    vocab_src = Vocab(filenames['train_src'], min_freq=config['min_freq_src'])
+    vocab_trg = Vocab(filenames['train_trg'], min_freq=config['min_freq_trg'])
+
+    train_dataset = TranslationDataset(vocab_src, 
+                                    vocab_trg, 
+                                    filenames['train_src'], 
+                                    filenames['train_trg'], 
+                                    max_len=config['max_len'], 
+                                    device=device)
+
+    val_dataset = TranslationDataset(vocab_src, 
+                                    vocab_trg, 
+                                    filenames['test_src'], 
+                                    filenames['test_trg'], 
+                                    max_len=72, 
+                                    device=device, 
+                                    sort_lengths=True)
+
+    unk_idx, pad_idx, bos_idx, eos_idx = 0, 1, 2, 3
+
+    train_loader = TrainDataLoader(train_dataset, shuffle=True)
+    val_loader = TestDataLoader(val_dataset)
+
+    src_vocab_size = len(vocab_src)
+    trg_vocab_size = len(vocab_trg)
+
+    model = LSTM_2(
+        src_vocab_size=src_vocab_size,
+        trg_vocab_size=trg_vocab_size,
+        embedding_dim=config['embedding_dim'],
+        hidden_size=config['hidden_size'],
+        dropout=config['dropout']
+    ).to(device)
+
+    criterion = nn.CrossEntropyLoss(ignore_index=pad_idx, 
+                                    label_smoothing=config['label_smoothing'])
+
+    optimizer = optim.AdamW(model.parameters(), 
+                            lr=config['learning_rate'], 
+                            weight_decay=config['weight_decay'])
+
+    scheduler = ReduceLROnPlateau(optimizer, 
+                                patience=config['patience'], 
+                                factor=config['gamma'], 
+                                threshold=config['threshold'])
+
+    print(model)
+
+    params_n = model.count_parameters()
+    weights_filename = folders['weights'] + f"{config['model_name']}-{config['feature']}-{params_n // 1e+6}m-{config['num_epochs']}epoch.pt"
+
+    if use_wandb: wandb.init(
+        project="bhw2",
+        config=config
+    )
+    
     # if use_wandb: wandb.watch(model, log="parameters", log_freq=10)
     train_losses = []
     val_losses = []
 
-    for epoch in range(num_epochs):
+    for epoch in range(config['num_epochs']):
         train_loss, val_loss = train_epoch(model, optimizer, train_loader, val_loader, criterion, vocab_trg, scheduler)
         
-        if use_wandb: wandb.log({"train_loss": train_loss, "epoch": epoch})
-        if use_wandb: log_data = {"val_loss": val_loss, "epoch": epoch}
-
         val_losses.append(train_loss)
         train_losses.append(val_loss)
-        if use_wandb: wandb.log(log_data)
 
-        if use_wandb and scheduler:
-            wandb.log({"lr": scheduler.get_last_lr()[0]})
+        if use_wandb: 
+            wandb.log({"train_loss": train_loss,
+                       "val_loss": val_loss, 
+                       "epoch": epoch,})
+
+            if scheduler:
+                wandb.log({"lr": scheduler.get_last_lr()[0]})
 
         if epoch > 5:
-            checkpoint_path = f'../weights/lstm-save-{epoch}.pt'
-            model.save(checkpoint_path)
+            checkpoint_path = f'lstm-save-{epoch}.pt'
+            model.save(checkpoint_path, folders['weights'])
             # if use_wandb: wandb.save(checkpoint_path)
             if epoch%3 == 0:
                 bleu_score = get_bleu(model, val_loader, vocab_trg)
                 print(f"BLEU4: {bleu_score}")
-                if use_wandb: log_data["bleu4"] = bleu_score
+                if use_wandb: wandb.log({"BLEU4": bleu_score})
 
-        print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+        print(f"Epoch [{epoch+1}/{config['num_epochs']}]\tTrain Loss: {train_loss:.4f}\tVal Loss: {val_loss:.4f}")
 
 
     model.train_loss = np.array(train_losses)
     model.val_loss = np.array(val_losses)
 
+    model.save(weights_filename, folders['weights'])
     wandb.finish()
+
     return train_losses, val_losses
 
 
@@ -208,12 +274,15 @@ class LSTM_2(nn.Module):
 
         return trg_seq
 
-    def save(self, filename):
-        np.save('train.npy', self.train_loss)
-        np.save('val.npy', self.val_loss)
-        torch.save(self.state_dict(), filename)
+    def save(self, filename, folder):
+        np.save(folder + 'train.npy', self.train_loss)
+        np.save(folder + 'val.npy', self.val_loss)
+        torch.save(self.state_dict(), folder + filename)
 
-    def load(self, filename):
-        self.train_loss = np.load('train.npy')
-        self.val_loss = np.load('val.npy')
-        self.load_state_dict(torch.load(filename, weights_only=True))
+    def load(self, filename, folder):
+        self.train_loss = np.load(folder + 'train.npy')
+        self.val_loss = np.load(folder + 'val.npy')
+        self.load_state_dict(torch.load(folder + filename, weights_only=True))
+
+    def count_parameters(self):
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)

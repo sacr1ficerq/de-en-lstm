@@ -1,6 +1,11 @@
-from build import build
+from lstm2 import train
 
-from config import filenames
+from config import filenames, folders
+
+from matplotlib import pyplot as plt
+
+import psutil
+import os
 
 device = 'cuda'
 
@@ -24,7 +29,21 @@ config = {
     'threshold': 0.001
 }
 
-build(config=config, 
-      filenames=filenames, 
-      use_wandb=True,
-      device=device)
+def plot_losses(train_losses, val_losses):
+    plt.figure(figsize=(10, 6))
+    plt.plot(train_losses, label="Training Loss")
+    plt.plot(val_losses, label="Validation Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Training and Validation Loss Over Epochs")
+    plt.legend()
+    plt.grid()
+    plt.show()
+
+# set current process to high priority
+p = psutil.Process(os.getpid())
+p.nice(psutil.HIGH_PRIORITY_CLASS)  # Windows-specific
+
+train_losses, val_losses = train(config=config, filenames=filenames, folders=folders, use_wandb=True, device=device)
+
+plot_losses(train_losses, val_losses)

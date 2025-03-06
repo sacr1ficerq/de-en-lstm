@@ -10,4 +10,5 @@ filenames = {
     'train_trg': folders['data'] + 'train.de-en.en',
     'test_src': folders['data'] + 'val.de-en.de',
     'test_trg': folders['data'] + 'val.de-en.en',
+    'submission_src': folders['data'] + 'test1.de-en.de',
 }
