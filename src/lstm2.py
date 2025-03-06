@@ -84,16 +84,10 @@ def train(config, filenames, folders, device='cuda', use_wandb=False):
     train_loader = TrainDataLoader(train_dataset, shuffle=True)
     val_loader = TestDataLoader(val_dataset)
 
-    src_vocab_size = len(vocab_src)
-    trg_vocab_size = len(vocab_trg)
+    config['src_vocab_size'] = len(vocab_src)
+    config['trg_vocab_size'] = len(vocab_trg)
 
-    model = LSTM_2(
-        src_vocab_size=src_vocab_size,
-        trg_vocab_size=trg_vocab_size,
-        embedding_dim=config['embedding_dim'],
-        hidden_size=config['hidden_size'],
-        dropout=config['dropout']
-    ).to(device)
+    model = LSTM_2(config=config).to(device)
 
     criterion = nn.CrossEntropyLoss(ignore_index=pad_idx, 
                                     label_smoothing=config['label_smoothing'])
@@ -157,11 +151,33 @@ def train(config, filenames, folders, device='cuda', use_wandb=False):
 
 
 class LSTM_2(nn.Module):
-    def __init__(self, src_vocab_size, trg_vocab_size, embedding_dim, hidden_size, num_layers=2, dropout=0.1):
+    def __init__(self, 
+                 src_vocab_size=None, 
+                 trg_vocab_size=None, 
+                 embedding_dim=None, 
+                 hidden_size=None, 
+                 num_layers=None, 
+                 dropout=None, 
+                 config=None,
+                 weights_filename=None):
         super().__init__()
 
         self.train_loss = []
         self.val_loss = []
+
+        if config:
+            if not src_vocab_size:
+                src_vocab_size = config['src_vocab_size']
+            if not trg_vocab_size:
+                trg_vocab_size = config['trg_vocab_size']
+            if not embedding_dim:
+                embedding_dim = config['embedding_dim']
+            if not hidden_size:
+                hidden_size = config['hidden_size']
+            if not num_layers:
+                num_layers = config.get('num_layers', 2)
+            if not dropout:
+                dropout = config.get('dropout', 0.1)
 
         self.num_layers = num_layers
         self.hidden_size = hidden_size
@@ -200,7 +216,9 @@ class LSTM_2(nn.Module):
                     nn.init.xavier_uniform_(param)
             elif "bias" in name:
                 nn.init.constant_(param, 0.0)
-
+        
+        if weights_filename:
+            self.load(weights_filename)
 
     def _project_hidden(self, state, proj_layers):
         batch_size = state.size(1)
@@ -279,10 +297,8 @@ class LSTM_2(nn.Module):
         np.save(folder + 'val.npy', self.val_loss)
         torch.save(self.state_dict(), folder + filename)
 
-    def load(self, filename, folder):
-        self.train_loss = np.load(folder + 'train.npy')
-        self.val_loss = np.load(folder + 'val.npy')
-        self.load_state_dict(torch.load(folder + filename, weights_only=True))
+    def load(self, filename):
+        self.load_state_dict(torch.load(filename, weights_only=True))
 
     def count_parameters(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
