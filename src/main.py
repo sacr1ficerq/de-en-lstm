@@ -11,15 +11,15 @@ device = 'cuda'
 
 config = {
     'model_name': 'LSTM_2',
-    'feature': 'deep-higher-embedding',
-    'max_len': 36,
+    'feature': 'new-vocab',
+    'max_len': 48,
     'min_freq_src': 5,
     'min_freq_trg': 4,
-    
-    'src_vocab_size': 30249 ,
-    'trg_vocab_size': 21950,
 
-    'embedding_dim': 192,
+    'src_vocab_size': 24991,
+    'trg_vocab_size': 21555,
+
+    'embedding_dim': 128,
     'hidden_size': 256,
     'num_layers': 3,
 

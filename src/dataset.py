@@ -9,12 +9,14 @@ import numpy as np
 
 from tqdm import tqdm
 
-unk_idx, pad_idx, bos_idx, eos_idx = 0, 1, 2, 3
+import re
+
+unk_idx, pad_idx, bos_idx, eos_idx, num_idx = 0, 1, 2, 3, 4
 
 def tokenize(line):
     return line.strip().split()
 
-specials = ['<UNK>', '<PAD>', '<BOS>', '<EOS>']
+specials = ['<UNK>', '<PAD>', '<BOS>', '<EOS>', '<NUM>']
 
 
 class Tokenizer():
@@ -25,10 +27,12 @@ class Tokenizer():
         sentences = [tokenize(line) for line in lines]
         self.sentences = sentences
 
+pattern_float = r"^-?\+?\d+\.?\,?\d*\+?-?$"
 
 class Vocab():
     def __init__(self, filename, min_freq=2, specials=specials):
         sentences = Tokenizer(filename).sentences
+        self.last_num = None
 
         self.word_counter = Counter([word for words in sentences for word in words])
         self.vocab = {}
@@ -37,7 +41,11 @@ class Vocab():
 
         vocab_set = set(self.word_counter.keys())
 
-        self.all_words = specials + sorted(set([word if self.word_counter[word] >= min_freq else '<UNK>' for word in vocab_set]) - self.specials)
+        self.all_words = []
+        for word in vocab_set:
+            if re.match(pattern_float, word) or self.word_counter[word] < min_freq: continue
+            self.all_words.append(word)
+        self.all_words = specials + sorted(set(self.all_words) - self.specials)
 
         for i, word in enumerate(self.all_words):
             self.vocab[word] = i
@@ -54,9 +62,13 @@ class Vocab():
         print((cnt[1]+2* cnt[2])/sum((np.array(list(cnt.values())))*(np.array(list(cnt.keys())))))
 
     def encode_word(self, word) -> int:
+        if re.match(pattern_float, word):
+            return num_idx
         return self.vocab[word] if word in self.vocab else self.vocab['<UNK>']
 
-    def decode_idx(self, idx) -> str:
+    def decode_idx(self, idx, src=None) -> str:
+        if idx == num_idx:
+            return '<NUM>'
         return self.all_words[idx] if idx < len(self) else '<UNK>'
 
     def encode(self, words, max_len=None):
@@ -72,14 +84,26 @@ class Vocab():
 
         return [self.encode_word(word) for word in words]
 
-    def decode(self, idxs, ignore=set(['<UNK>', '<BOS>', '<EOS>', '<PAD>'])):
+    def decode(self, idxs, ignore=set(['<UNK>', '<BOS>', '<EOS>', '<PAD>']), src=None):
         result = []
-        for idx in idxs:
+        has_num = False
+        nums_idxs = []
+        for i, idx in enumerate(idxs):
             if idx == eos_idx:
                 break
+            if idx == num_idx:
+                has_num = True
+                nums_idxs.append(i)
+            if i != 0 and idxs[i-1] == idxs[i]: continue 
             result.append(self.decode_idx(idx))
+        if has_num and src:
+            nums_src = list(filter(lambda x: re.match(pattern_float, x), src))
+            for t, idx in enumerate(nums_idxs):
+                if len(nums_src) < t:
+                    break
+                result[idx] = nums_src[t]
         return list(filter(lambda word: not word in ignore, result))
-    
+
     def __len__(self):
         return len(self.all_words)
 

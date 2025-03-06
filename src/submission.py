@@ -23,23 +23,23 @@ def eval_bleu(pred_filename, ref_filename):
 # no_unk = set(['<BOS>', '<EOS>', '<PAD>'])
 no_unk = set(['<BOS>', '<EOS>'])
 
-def get_bleu(model, dataloader, vocab_trg, device='cuda'):
-    pred_filename = "val.pred.en"
-    ref_filename = "val.ref.en"
+def get_bleu(model, dataloader, vocab_trg, filenames, device='cuda'):
 
-    with open(pred_filename, 'w', encoding='utf-8') as f_pred, \
-         open(ref_filename, 'w', encoding='utf-8') as f_ref:
+    pred_filename = filenames['test_pred']
+    ref_filename = filenames['test_trg']
+
+    with open(pred_filename, 'w', encoding='utf-8') as f_pred:
         with torch.no_grad():
-            for src, trg in tqdm(dataloader):
+            for src, _ in tqdm(dataloader):
                 predictions = model.inference(src, max_len=None, device=device) # batch
                 for i in range(len(src)):
-                    pred_text = vocab_trg.decode(predictions[i], ignore=no_unk)
+                    pred_text = vocab_trg.decode(predictions[i], ignore=no_unk, src=src)
                     f_pred.write(" ".join(pred_text) + '\n')
 
-                for trg_seq in trg:
-                    ref_text = vocab_trg.decode(trg_seq, ignore=no_unk)
-                    # ref_text = vocab_trg.decode(trg_seq)
-                    f_ref.write(" ".join(ref_text) + '\n')
+                # for trg_seq in trg:
+                #     ref_text = vocab_trg.decode(trg_seq, ignore=no_unk)
+                #     # ref_text = vocab_trg.decode(trg_seq)
+                #     f_ref.write(" ".join(ref_text) + '\n')
                   
 
     bleu_score = eval_bleu(pred_filename, ref_filename)
@@ -47,9 +47,8 @@ def get_bleu(model, dataloader, vocab_trg, device='cuda'):
     return bleu_score
 
 
-submission_filename = 'submission.en'
-def make_submission(model, submission_loader, vocab_trg, submission_filename=submission_filename, device='cuda'):
-    with open(submission_filename, 'w', encoding='utf-8') as f_pred:
+def make_submission(model, submission_loader, vocab_trg, filenames, device='cuda'):
+    with open(filenames['submission_trg'], 'w', encoding='utf-8') as f_pred:
         with torch.no_grad():
             for a in tqdm(submission_loader):
                 predictions = model.inference(a, max_len=None, device=device) # batch

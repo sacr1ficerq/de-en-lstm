@@ -134,9 +134,12 @@ def train(config, filenames, folders, device='cuda', use_wandb=False):
             model.save(checkpoint_path, folders['weights'])
             # if use_wandb: wandb.save(checkpoint_path)
             if epoch%3 == 0:
-                bleu_score = get_bleu(model, val_loader, vocab_trg)
-                print(f"BLEU4: {bleu_score}")
-                if use_wandb: wandb.log({"BLEU4": bleu_score})
+                try:
+                    bleu_score = get_bleu(model, val_loader, vocab_trg, filenames)
+                    print(f"BLEU4: {bleu_score}")
+                    if use_wandb: wandb.log({"BLEU4": bleu_score})
+                except:
+                    print('wrong bleu function')
 
         print(f"Epoch [{epoch+1}/{config['num_epochs']}]\tTrain Loss: {train_loss:.4f}\tVal Loss: {val_loss:.4f}")
 
