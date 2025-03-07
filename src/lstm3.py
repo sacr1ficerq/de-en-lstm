@@ -17,28 +17,40 @@ import wandb
 
 unk_idx, pad_idx, bos_idx, eos_idx = 0, 1, 2, 3
 
+from torch.autograd import profiler
 
 
 def train_epoch(model, optimizer, train_loader, val_loader, criterion, vocab_trg, scheduler, teacher_forcing=1):
     model.train()
     total_train_loss = 0
 
-    for src_seq, trg_seq in tqdm(train_loader):
-        trg_input = trg_seq[:, :-1]
-        trg_output = trg_seq[:, 1:]
+    with profiler.profile(use_cuda=True) as prof:
+        for i, (src_seq, trg_seq) in enumerate(tqdm(train_loader)):
+            trg_input = trg_seq[:, :-1]
+            trg_output = trg_seq[:, 1:]
 
-        logits = model(src_seq, trg_input, teacher_forcing=teacher_forcing)
-        logits = logits.view(-1, len(vocab_trg))
-        trg_output = trg_output.reshape(-1)
+            # with profiler.profile(use_cuda=True) as prof:
+            #     logits = model(src_seq, trg_seq)
+            
+            # print(prof.key_averages().table(sort_by="cuda_time_total"))
 
-        loss = criterion(logits, trg_output)
-        total_train_loss += loss.item()
+            logits = model.forward(src_seq, trg_input, teacher_forcing=teacher_forcing)
+            
+            logits = logits.view(-1, len(vocab_trg))
+            trg_output = trg_output.reshape(-1)
 
-        optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
+            loss = criterion(logits, trg_output)
+            total_train_loss += loss.item()
 
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+            if i > 10:
+                break
+    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+    return 0, 0
     model.eval()
     total_val_loss = 0
 
@@ -64,7 +76,7 @@ def train_epoch(model, optimizer, train_loader, val_loader, criterion, vocab_trg
 
 def train(config, filenames, folders, device='cuda', use_wandb=False, vocab_src=None, vocab_trg=None, train_dataset=None, val_dataset=None):
     if vocab_src == None: vocab_src = Vocab(filenames['train_src'], min_freq=config['min_freq_src'])
-    if vocab_src == None: vocab_trg = Vocab(filenames['train_trg'], min_freq=config['min_freq_trg'])
+    if vocab_trg == None: vocab_trg = Vocab(filenames['train_trg'], min_freq=config['min_freq_trg'])
 
     if train_dataset==None: train_dataset = TranslationDataset(vocab_src, 
                                     vocab_trg, 
@@ -83,7 +95,7 @@ def train(config, filenames, folders, device='cuda', use_wandb=False, vocab_src=
 
     unk_idx, pad_idx, bos_idx, eos_idx = 0, 1, 2, 3
 
-    train_loader = TrainDataLoader(train_dataset, batch_size=128, shuffle=True)
+    train_loader = TrainDataLoader(train_dataset, batch_size=config.get('batch_size', 128), shuffle=True)
     val_loader = TestDataLoader(val_dataset, batch_size=256, shuffle=False)
 
     config['src_vocab_size'] = len(vocab_src)
@@ -118,6 +130,7 @@ def train(config, filenames, folders, device='cuda', use_wandb=False, vocab_src=
     val_losses = []
 
     teacher_forcing = 1.0
+    # teacher_forcing = 0.5
 
     for epoch in range(1, config['num_epochs']+1):
         train_loss, val_loss = train_epoch(model, 
@@ -128,6 +141,7 @@ def train(config, filenames, folders, device='cuda', use_wandb=False, vocab_src=
                                            vocab_trg, 
                                            scheduler,
                                            teacher_forcing=teacher_forcing)
+        break
         
         val_losses.append(train_loss)
         train_losses.append(val_loss)
@@ -213,10 +227,10 @@ class LSTM_3(nn.Module):
         self.trg_embedding = nn.Embedding(trg_vocab_size, embedding_dim, padding_idx=pad_idx)
         self.emb_dropout = nn.Dropout(emb_dropout)
 
-        self.enc_dropout = nn.Dropout(enc_dropout)
-        self.dec_dropout = nn.Dropout(dec_dropout)
+        # self.enc_dropout = nn.Dropout(enc_dropout, inplace=False)
+        # self.dec_dropout = nn.Dropout(dec_dropout, inplace=False)
 
-        self.attention_dropout = nn.Dropout(attention_dropout)
+        # self.attention_dropout = nn.Dropout(attention_dropout, inplace=False)
 
         self.encoder = nn.LSTM(embedding_dim, 
                                hidden_size, 
@@ -259,11 +273,16 @@ class LSTM_3(nn.Module):
         state = torch.cat([state[:, 0], state[:, 1]], dim=2)  # (num_layers, batch, 2*hidden_size)
         return torch.stack([proj_layers[i](state[i]) for i in range(self.num_layers)], dim=0)
 
-    def forward(self, src_seq, trg_seq, device='cuda', teacher_forcing=1.0):
+    def forward(self, src_seq, trg_seq, device='cuda', teacher_forcing=1.0, tf_mask = None, logits=None):
+        # if teacher_forcing == 1.0: return self.forward_no_tf(src_seq, trg_seq)
         src_embedded = self.emb_dropout(self.src_embedding(src_seq)) # (batch_size, src_len, embedding_dim)
 
         encoder_outputs, (hidden, cell) = self.encoder(src_embedded)  # hidden/cell: (1, batch_size, hidden_size)
-        encoder_outputs = self.enc_dropout(self.encoder_output_proj(encoder_outputs))
+        # encoder_outputs = self.enc_dropout(self.encoder_output_proj(encoder_outputs))
+        encoder_outputs = self.encoder_output_proj(encoder_outputs)
+
+        encoder_outputs_t = encoder_outputs.transpose(1, 2)
+        mask = (src_seq != pad_idx).unsqueeze(1)  # (batch_size, 1, src_len)
 
         hidden = self._project_hidden(hidden, self.encoder_hidden_proj)
         cell = self._project_hidden(cell, self.encoder_cell_proj)
@@ -273,35 +292,80 @@ class LSTM_3(nn.Module):
         trg_vocab_size = self.fc.out_features
 
         # tensor to store decoder outputs
-        logits = torch.zeros(batch_size, trg_len, trg_vocab_size).to(device)
+        logits = torch.zeros(batch_size, trg_len, trg_vocab_size, device=device)
         decoder_input = trg_seq[:, 0].unsqueeze(1)  # [<sos>] (batch_size, 1)
+
+        tf_mask = (torch.rand(batch_size, trg_len - 1, device=device) < teacher_forcing).long()
 
         # autoregressive decoding with teacher forcing
         for t in range(1, trg_len):  # skip <sos>
-            trg_embedded = self.emb_dropout(self.trg_embedding(decoder_input))  # (batch_size, 1, emb_dim)
+            trg_embedded = self.trg_embedding(decoder_input)  # (batch_size, 1, emb_dim)
+            # trg_embedded = self.emb_dropout(self.trg_embedding(decoder_input))  # (batch_size, 1, emb_dim)
+            
             decoder_output, (hidden, cell) = self.decoder(trg_embedded, (hidden, cell))
 
-            decoder_output = self.dec_dropout(decoder_output)
+            # decoder_output = self.dec_dropout(decoder_output)
 
-            energy = torch.bmm(decoder_output, encoder_outputs.transpose(1, 2))  # (batch_size, 1, src_len)
-
-            mask = (src_seq != pad_idx).unsqueeze(1)  # (batch_size, 1, src_len)
+            energy = torch.bmm(decoder_output, encoder_outputs_t)  # (batch_size, 1, src_len)
             energy = energy.masked_fill(mask == 0, -1e10)
             
             attention = F.softmax(energy, dim=-1)
-            attention = self.attention_dropout(attention)
+            # attention = self.attention_dropout(attention)
             context = torch.bmm(attention, encoder_outputs)  # (batch_size, 1, hidden_dim)
 
             combined = torch.cat([decoder_output, context], dim=2)  # (batch_size, 1, hidden_dim * 2)
-            step_logits = self.fc(combined)  # (batch_size, 1, trg_vocab_size)
+            # step_logits = self.fc(combined)  # (batch_size, 1, trg_vocab_size)
+            # logits[:, t] = step_logits.squeeze(1)
+            logits[:, t] = self.fc(combined).squeeze(1)  # (batch_size, trg_vocab_size)
+            # print(logits.size(), logits[:, t].size())
+                
+            next_token_gt = trg_seq[:, t].unsqueeze(1)  # Ground truth (batch_size, 1)
+            # next_token_pred = step_logits.argmax(-1)  # Predicted token (batch_size, 1)
+            next_token_pred = logits[:, t].argmax(-1).unsqueeze(1)  # Predicted token (batch_size, 1)
+            # print(next_token_pred.size())
+            decoder_input = torch.where(
+                tf_mask[:, t - 1].unsqueeze(1).bool(),
+                next_token_gt,
+                next_token_pred,
+            )
 
-            logits[:, t] = step_logits.squeeze(1)
-
-            use_teacher_forcing = random() < teacher_forcing
-            top1 = step_logits.argmax(-1)  # (batch_size, 1)
-            decoder_input = trg_seq[:, t].unsqueeze(1) if use_teacher_forcing else top1
 
         return logits  # (batch_size, trg_len, trg_vocab_size)
+
+    def forward_no_tf(self, src_seq, trg_seq, device='cuda'):
+        src_embedded = self.src_embedding(src_seq) # (batch_size, src_len, embedding_dim)
+
+        encoder_outputs, (hidden, cell) = self.encoder(src_embedded)  # hidden/cell: (1, batch_size, hidden_size)
+        encoder_outputs = self.encoder_output_proj(encoder_outputs)
+
+        hidden = self._project_hidden(hidden, self.encoder_hidden_proj)
+        cell = self._project_hidden(cell, self.encoder_cell_proj)
+
+        trg_embedded = self.trg_embedding(trg_seq) # (batch_size, trg_len, embedding_dim)
+        decoder_outputs, _ = self.decoder(trg_embedded, (hidden, cell))  # (batch_size, trg_len, hidden_size)
+
+        # attention
+        energy = torch.bmm(decoder_outputs, encoder_outputs.transpose(1, 2))
+
+        mask = (src_seq != pad_idx).unsqueeze(1)  # (batch_size, 1, src_len)
+        energy = energy.masked_fill(mask == 0, -1e10)
+
+        attention = F.softmax(energy, dim=-1)
+
+        context = torch.bmm(attention, encoder_outputs)
+        combined = torch.cat([decoder_outputs, context], dim=2)
+        
+        batch_size = src_seq.size(0)
+        trg_len = trg_seq.size(1)
+        trg_vocab_size = self.fc.out_features
+        logits = torch.zeros(batch_size, trg_len, trg_vocab_size, device=device)
+        tf_mask = (torch.rand(batch_size, trg_len - 1, device=device) < 0.5).long()
+
+        for t in range(1, trg_len):
+            pass
+
+        logits = self.fc(combined)
+        return logits
 
     def inference(self, src_seq, max_len=50, device='cuda'):
         self.eval()
