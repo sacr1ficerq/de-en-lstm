@@ -31,10 +31,11 @@ def get_bleu(model, dataloader, vocab_trg, filenames, device='cuda', raw_dataset
     with open(pred_filename, 'w', encoding='utf-8') as f_pred:
         with torch.no_grad():
             for batch_idx, (src, _) in enumerate(tqdm(dataloader)):
-                predictions = model.inference(src, max_len=None, device=device) # batch
+                # predictions = model.inference(src, max_len=None, device=device) # batch
+                predictions = model.inference(src, device=device) # batch
                 for i in range(len(src)):
                     t = None
-                    if raw_dataset:
+                    if raw_dataset != None:
                         t = raw_dataset[batch_idx * dataloader.batch_size + i]
                         # print(t)
                     pred_text = vocab_trg.decode(predictions[i], ignore=no_unk, src=t)

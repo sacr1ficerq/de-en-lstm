@@ -12,21 +12,16 @@ device = 'cuda'
 config = {
     'model_name': 'LSTM_3',
     'feature': 'testing-teacher-forcing',
-    # 'max_len': 48,
-    'max_len': 24,
-    'min_freq_src': 4,
-    'min_freq_trg': 4,
+    'max_len': 42,
+    'min_freq_src': 5,
+    'min_freq_trg': 5,
     
-    'src_vocab_size': 29798,
-    'trg_vocab_size': 21555,
+    'src_vocab_size': 24991,
+    'trg_vocab_size': 18710,
 
-    # 'embedding_dim': 128,
-    # 'hidden_size': 256,
-    # 'num_layers': 3,
-
-    'embedding_dim': 64,
-    'hidden_size': 128,
-    'num_layers': 2,
+    'embedding_dim': 128,
+    'hidden_size': 256,
+    'num_layers': 3,
 
     'num_epochs': 15,
     'weight_decay': 1e-5,
@@ -59,6 +54,6 @@ def plot_losses(train_losses, val_losses):
 p = psutil.Process(os.getpid())
 p.nice(psutil.HIGH_PRIORITY_CLASS)  # Windows-specific
 
-train_losses, val_losses = train(config=config, filenames=filenames, folders=folders, use_wandb=False, device=device)
+train_losses, val_losses = train(config=config, filenames=filenames, folders=folders, use_wandb=True, device=device)
 
 plot_losses(train_losses, val_losses)
