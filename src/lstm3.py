@@ -7,11 +7,11 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
+from time import sleep
+
 from tqdm import tqdm
 
 import numpy as np
-
-from random import random
 
 import wandb
 
@@ -20,11 +20,11 @@ unk_idx, pad_idx, bos_idx, eos_idx = 0, 1, 2, 3
 from torch.autograd import profiler
 
 
-def train_epoch(model, optimizer, train_loader, val_loader, criterion, vocab_trg, scheduler, teacher_forcing=1):
+def profile_epoch(model, optimizer, train_loader, val_loader, criterion, vocab_trg, scheduler, teacher_forcing=1, include_backward=True):
     model.train()
     total_train_loss = 0
 
-    with profiler.profile(use_cuda=True) as prof:
+    with profiler.profile(use_cuda=True, use_kineto=True, profile_memory=True) as prof:
         for i, (src_seq, trg_seq) in enumerate(tqdm(train_loader)):
             trg_input = trg_seq[:, :-1]
             trg_output = trg_seq[:, 1:]
@@ -60,6 +60,92 @@ def train_epoch(model, optimizer, train_loader, val_loader, criterion, vocab_trg
             trg_output = trg_seq[:, 1:]
 
             logits = model(src_seq, trg_input, teacher_forcing=0)
+            logits = logits.view(-1, len(vocab_trg))
+            trg_output = trg_output.reshape(-1)
+
+            loss = criterion(logits, trg_output)
+            total_val_loss += loss.item()
+
+    avg_val_loss = total_val_loss / len(val_loader)
+    avg_train_loss = total_train_loss / len(train_loader)
+
+    if scheduler:
+        scheduler.step(avg_val_loss)
+
+    return
+
+def profile(config, filenames, vocab_src, vocab_trg, train_dataset, val_dataset):
+    device='cuda'
+    unk_idx, pad_idx, bos_idx, eos_idx = 0, 1, 2, 3
+
+    train_loader = TrainDataLoader(train_dataset, batch_size=config.get('batch_size', 128), shuffle=True)
+    val_loader = TestDataLoader(val_dataset, batch_size=256, shuffle=False)
+
+    config['src_vocab_size'] = len(vocab_src)
+    config['trg_vocab_size'] = len(vocab_trg)
+
+    model = LSTM_3(config=config).to(device)
+
+    criterion = nn.CrossEntropyLoss(ignore_index=pad_idx, 
+                                    label_smoothing=config['label_smoothing'])
+
+    optimizer = optim.AdamW(model.parameters(), 
+                            lr=config['learning_rate'], 
+                            weight_decay=config['weight_decay'])
+
+    scheduler = ReduceLROnPlateau(optimizer, 
+                                patience=config['patience'], 
+                                factor=config['gamma'], 
+                                threshold=config['threshold'])
+
+    print(model)
+
+
+    teacher_forcing = 1.0
+    # teacher_forcing = 0.5
+
+    train_loss, val_loss = train_epoch(model, 
+                                        optimizer, 
+                                        train_loader, 
+                                        val_loader, 
+                                        criterion, 
+                                        vocab_trg, 
+                                        scheduler,
+                                        teacher_forcing=teacher_forcing)
+
+    return
+
+def train_epoch(model, optimizer, train_loader, val_loader, criterion, vocab_trg, scheduler, teacher_forcing=1):
+    model.train()
+    total_train_loss = 0
+
+    for src_seq, trg_seq in tqdm(train_loader):
+        trg_input = trg_seq[:, :-1]
+        trg_output = trg_seq[:, 1:]
+
+        logits = model(src_seq, trg_input, teacher_forcing=teacher_forcing)
+        # logits = model.forward_no_tf(src_seq, trg_input)
+        logits = logits.view(-1, len(vocab_trg))
+        trg_output = trg_output.reshape(-1)
+
+        loss = criterion(logits, trg_output)
+        total_train_loss += loss.item()
+
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+
+    model.eval()
+    total_val_loss = 0
+
+    with torch.no_grad():
+        for src_seq, trg_seq in tqdm(val_loader):
+            trg_input = trg_seq[:, :-1]
+            trg_output = trg_seq[:, 1:]
+
+            # logits = model.forward_no_tf(src_seq, trg_input)
+            logits = model(src_seq, trg_input, teacher_forcing=0.0)
             logits = logits.view(-1, len(vocab_trg))
             trg_output = trg_output.reshape(-1)
 
@@ -141,7 +227,6 @@ def train(config, filenames, folders, device='cuda', use_wandb=False, vocab_src=
                                            vocab_trg, 
                                            scheduler,
                                            teacher_forcing=teacher_forcing)
-        break
         
         val_losses.append(train_loss)
         train_losses.append(val_loss)
@@ -154,8 +239,8 @@ def train(config, filenames, folders, device='cuda', use_wandb=False, vocab_src=
             if scheduler:
                 wandb.log({"lr": scheduler.get_last_lr()[0]})
 
-        if epoch >= 4:
-            teacher_forcing *= 0.8
+        if epoch >= 6:
+            teacher_forcing = 0.7 - 0.05 * (epoch - 6)
             checkpoint_path = f'lstm-save-{epoch}.pt'
             model.save(checkpoint_path, folders['weights'])
             # if use_wandb: wandb.save(checkpoint_path)
@@ -177,9 +262,6 @@ def train(config, filenames, folders, device='cuda', use_wandb=False, vocab_src=
     wandb.finish()
 
     return train_losses, val_losses
-
-unk_idx, pad_idx, bos_idx, eos_idx, num_idx = 0, 1, 2, 3, 4
-
 
 class LSTM_3(nn.Module):
     def __init__(self, 
@@ -227,10 +309,10 @@ class LSTM_3(nn.Module):
         self.trg_embedding = nn.Embedding(trg_vocab_size, embedding_dim, padding_idx=pad_idx)
         self.emb_dropout = nn.Dropout(emb_dropout)
 
-        # self.enc_dropout = nn.Dropout(enc_dropout, inplace=False)
-        # self.dec_dropout = nn.Dropout(dec_dropout, inplace=False)
+        self.enc_dropout = nn.Dropout(enc_dropout, inplace=False)
+        self.dec_dropout = nn.Dropout(dec_dropout, inplace=False)
 
-        # self.attention_dropout = nn.Dropout(attention_dropout, inplace=False)
+        self.attention_dropout = nn.Dropout(attention_dropout, inplace=False)
 
         self.encoder = nn.LSTM(embedding_dim, 
                                hidden_size, 
@@ -273,13 +355,13 @@ class LSTM_3(nn.Module):
         state = torch.cat([state[:, 0], state[:, 1]], dim=2)  # (num_layers, batch, 2*hidden_size)
         return torch.stack([proj_layers[i](state[i]) for i in range(self.num_layers)], dim=0)
 
-    def forward(self, src_seq, trg_seq, device='cuda', teacher_forcing=1.0, tf_mask = None, logits=None):
-        # if teacher_forcing == 1.0: return self.forward_no_tf(src_seq, trg_seq)
+    def forward(self, src_seq, trg_seq, device='cuda', teacher_forcing=1.0):
+        if teacher_forcing == 1.0: return self.forward_no_tf(src_seq, trg_seq)
         src_embedded = self.emb_dropout(self.src_embedding(src_seq)) # (batch_size, src_len, embedding_dim)
 
         encoder_outputs, (hidden, cell) = self.encoder(src_embedded)  # hidden/cell: (1, batch_size, hidden_size)
-        # encoder_outputs = self.enc_dropout(self.encoder_output_proj(encoder_outputs))
         encoder_outputs = self.encoder_output_proj(encoder_outputs)
+        encoder_outputs = self.enc_dropout(encoder_outputs)
 
         encoder_outputs_t = encoder_outputs.transpose(1, 2)
         mask = (src_seq != pad_idx).unsqueeze(1)  # (batch_size, 1, src_len)
@@ -297,6 +379,7 @@ class LSTM_3(nn.Module):
 
         tf_mask = (torch.rand(batch_size, trg_len - 1, device=device) < teacher_forcing).long()
 
+        # print('no tf')
         # autoregressive decoding with teacher forcing
         for t in range(1, trg_len):  # skip <sos>
             trg_embedded = self.trg_embedding(decoder_input)  # (batch_size, 1, emb_dim)
@@ -316,7 +399,7 @@ class LSTM_3(nn.Module):
             combined = torch.cat([decoder_output, context], dim=2)  # (batch_size, 1, hidden_dim * 2)
             # step_logits = self.fc(combined)  # (batch_size, 1, trg_vocab_size)
             # logits[:, t] = step_logits.squeeze(1)
-            logits[:, t] = self.fc(combined).squeeze(1)  # (batch_size, trg_vocab_size)
+            logits[:, t:t+1] = self.fc(combined)  # (batch_size, trg_vocab_size)
             # print(logits.size(), logits[:, t].size())
                 
             next_token_gt = trg_seq[:, t].unsqueeze(1)  # Ground truth (batch_size, 1)
@@ -354,15 +437,6 @@ class LSTM_3(nn.Module):
 
         context = torch.bmm(attention, encoder_outputs)
         combined = torch.cat([decoder_outputs, context], dim=2)
-        
-        batch_size = src_seq.size(0)
-        trg_len = trg_seq.size(1)
-        trg_vocab_size = self.fc.out_features
-        logits = torch.zeros(batch_size, trg_len, trg_vocab_size, device=device)
-        tf_mask = (torch.rand(batch_size, trg_len - 1, device=device) < 0.5).long()
-
-        for t in range(1, trg_len):
-            pass
 
         logits = self.fc(combined)
         return logits
@@ -372,34 +446,52 @@ class LSTM_3(nn.Module):
 
         batch_size = src_seq.size(0)
         trg_seq = torch.tensor([[bos_idx]] * batch_size, dtype=torch.long).to(device)  # (batch_size, 1)
+        mask = (src_seq != pad_idx).unsqueeze(1)  # (batch_size, 1, src_len)
 
         with torch.no_grad():
             # encoder forward
             src_embedded = self.src_embedding(src_seq)
-            encoder_outputs, (hidden, cell) = self.encoder(src_embedded)
+            encoder_outputs, (hidden, cell) = self.encoder(src_embedded) # (B, max_len, H)
+            # print('Encoder norm:', torch.norm(encoder_outputs[0, :20, :], 2))
+
             encoder_outputs = self.encoder_output_proj(encoder_outputs)
-            encoder_outputs = encoder_outputs.contiguous()  # ensure contiguous
+            # encoder_outputs = encoder_outputs.contiguous()  # ensure contiguous
+            encoder_outputs_t = encoder_outputs.transpose(1, 2) # (B, max_len, 2 * H) 
             
+            # print(cell.size(), hidden.size())
             # project encoder hidden states for decoder
-            hidden = self._project_hidden(hidden, self.encoder_hidden_proj)
+            hidden = self._project_hidden(hidden, self.encoder_hidden_proj) # (layers, B, H)
             cell = self._project_hidden(cell, self.encoder_cell_proj)
+            # print(cell.size(), hidden.size())
+            # print('hidden norm:', torch.norm(hidden[:, 0, :], 2))
+
             if max_len == None:
                 max_len = src_seq.size(1) + 5
-            for _ in range(max_len):
+            for i in range(max_len):
                 # get last token (batch_size, 1)
                 current_trg = trg_seq[:, -1].unsqueeze(1)
+                # print('trg: ', *current_trg[0])
                 trg_embedded = self.trg_embedding(current_trg)  # (batch_size, 1, emb_dim)
                 
                 decoder_output, (hidden, cell) = self.decoder(trg_embedded, (hidden, cell))
-                
-                energy = torch.bmm(decoder_output, encoder_outputs.transpose(1, 2).contiguous())
+                # print('Decoder norm:', torch.norm(decoder_output[0, :, :], 2))
+
+                # energy = torch.bmm(decoder_output, encoder_outputs.transpose(1, 2).contiguous())
+                energy = torch.bmm(decoder_output, encoder_outputs_t)
+                # print('Energy norm:', torch.norm(energy[0, :, :], 2))
+                energy = energy.masked_fill(mask == 0, -1e10)
                 attention = F.softmax(energy, dim=-1)
+
                 context = torch.bmm(attention, encoder_outputs)
                 combined = torch.cat([decoder_output, context], dim=2)
                 
                 logits = self.fc(combined)  # (batch_size, 1, trg_vocab_size)
-                logits[:, :, unk_idx] = -1e10
-                next_token = logits.argmax(dim=-1)
+                # logits[:, :, unk_idx] = -1e10
+                
+                # print(*torch.topk(logits, 3, dim=-1).values[0], *torch.topk(logits, 3, dim=-1).indices[0])
+                next_token = logits.argmax(dim=-1) # greedy
+                # print(next_token[0])
+                
                 
                 trg_seq = torch.cat([trg_seq, next_token], dim=1)
 
@@ -407,6 +499,16 @@ class LSTM_3(nn.Module):
                     break
 
         return trg_seq
+
+    def demonstrate(self, val_loader, vocab_src, vocab_trg, examples=10, device='cuda'):
+        for batch_idx, (src, trg) in enumerate(val_loader):
+            predictions = self.inference(src, device=device) # batch
+            for i in range(len(src)):
+                print(list(src[i]).index(eos_idx),list(trg[i]).index(eos_idx), list(predictions[i]).index(eos_idx))
+                print("src:\t", " ".join(vocab_src.decode(src[i])))
+                print("trg:\t", " ".join(vocab_trg.decode(trg[i])))
+                print("pred:\t", " ".join(vocab_trg.decode(predictions[i])))
+                sleep(3)
 
     def save(self, filename, folder):
         np.save(folder + 'train.npy', self.train_loss)
