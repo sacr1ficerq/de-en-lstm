@@ -89,17 +89,19 @@ class Vocab():
         result = []
         has_num = False
         nums_idxs = []
-        for i, idx in enumerate(idxs):
+        i = 0
+        for idx in idxs:
+            if i != 0 and idxs[i-1] == idxs[i]: continue 
             if idx == eos_idx:
                 break
             if idx == num_idx:
                 has_num = True
                 nums_idxs.append(i)
-            if i != 0 and idxs[i-1] == idxs[i]: continue 
             result.append(self.decode_idx(idx))
+            i += 1
         if has_num and src != None:
             nums_src = list(filter(lambda x: re.match(pattern_float, x), src))
-            # print(nums_src)
+            # print(nums_idxs, len(result))
             for t, idx in enumerate(nums_idxs):
                 if len(nums_src) <= t:
                     break
@@ -226,3 +228,8 @@ class TestDataLoader(DataLoader):
             shuffle=shuffle,
             collate_fn=collate_fn
         )
+    def __getitem__(self, idx):
+        for i, batch in enumerate(self):
+            if i == idx:
+                return batch
+        return None
