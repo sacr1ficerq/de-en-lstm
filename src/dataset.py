@@ -16,6 +16,7 @@ unk_idx, pad_idx, bos_idx, eos_idx, num_idx = 0, 1, 2, 3, 4
 def tokenize(line):
     return line.strip().split()
 
+# specials = ['<UNK>', '<PAD>', '<BOS>', '<EOS>', '<NUM>', '<SUB>']
 specials = ['<UNK>', '<PAD>', '<BOS>', '<EOS>', '<NUM>']
 
 
@@ -67,10 +68,8 @@ class Vocab():
             return num_idx
         return self.vocab[word] if word in self.vocab else self.vocab['<UNK>']
 
-    def decode_idx(self, idx, src=None) -> str:
-        if idx == num_idx:
-            return '<NUM>'
-        return self.all_words[idx] if idx < len(self) else '<UNK>'
+    def decode_idx(self, idx) -> str:
+        return self.all_words[idx]
 
     def encode(self, words, max_len=None):
         if words[0] != '<BOS>':

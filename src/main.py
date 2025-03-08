@@ -12,7 +12,7 @@ device = 'cuda'
 
 config = {
     'model_name': 'LSTM_3',
-    'feature': 'more-dropout-hs360',
+    'feature': 'even-more-regularization',
     'max_len': 42,
     'min_freq_src': 5,
     'min_freq_trg': 5,
@@ -22,13 +22,13 @@ config = {
     'num_layers': 3,
 
     'num_epochs': 15,
-    'weight_decay': 1e-5,
+    'weight_decay': 2e-5,
     'label_smoothing': 0.1,
 
-    'dropout_emb': 0.15,
+    'dropout_emb': 0.2,
 
-    'dropout_enc': 0.3,
-    'dropout_dec': 0.3,
+    'dropout_enc': 0.4,
+    'dropout_dec': 0.4,
 
     'dropout_attention': 0.1,
 
@@ -39,12 +39,15 @@ config = {
     'batch_size': 128,
 
     'use_tf': False,
-    'tf_start': 1e+10,
-    'tf_decrease': 1e+10
+    'tf_from_epoch': 0,
+    'tf_start': 0.9,
+    'tf_decrease': 0.02
 }
 
 vocab_src = Vocab(filenames['train_src'], min_freq=config['min_freq_src'])
 vocab_trg = Vocab(filenames['train_trg'], min_freq=config['min_freq_trg'])
+
+# config['weights'] = '../weights/LSTM_3-more-dropout-hs360-30.0m-15epoch.pt'
 
 train_dataset = TranslationDataset(vocab_src, 
                                 vocab_trg, 
