@@ -138,8 +138,20 @@ def train_epoch(model, optimizer, train_loader, val_loader, criterion, vocab_trg
 
     model.eval()
     total_val_loss = 0
-
+    total_val_loss_no_tf = 0
     with torch.no_grad():
+        for src_seq, trg_seq in tqdm(val_loader):
+            trg_input = trg_seq[:, :-1]
+            trg_output = trg_seq[:, 1:]
+
+            # logits = model.forward_no_tf(src_seq, trg_input)
+            logits = model(src_seq, trg_input, teacher_forcing=1.0)
+            logits = logits.view(-1, len(vocab_trg))
+            trg_output = trg_output.reshape(-1)
+
+            loss = criterion(logits, trg_output)
+            total_val_loss += loss.item()
+
         for src_seq, trg_seq in tqdm(val_loader):
             trg_input = trg_seq[:, :-1]
             trg_output = trg_seq[:, 1:]
@@ -150,19 +162,27 @@ def train_epoch(model, optimizer, train_loader, val_loader, criterion, vocab_trg
             trg_output = trg_output.reshape(-1)
 
             loss = criterion(logits, trg_output)
-            total_val_loss += loss.item()
+            total_val_loss_no_tf += loss.item()
 
     avg_val_loss = total_val_loss / len(val_loader)
+    avg_val_loss_no_tf = total_val_loss_no_tf / len(val_loader)
     avg_train_loss = total_train_loss / len(train_loader)
 
     if scheduler:
         scheduler.step(avg_val_loss)
 
-    return avg_train_loss, avg_val_loss
+    return avg_train_loss, avg_val_loss, avg_val_loss_no_tf
 
 def train(config, filenames, folders, device='cuda', use_wandb=False, vocab_src=None, vocab_trg=None, train_dataset=None, val_dataset=None):
     if vocab_src == None: vocab_src = Vocab(filenames['train_src'], min_freq=config['min_freq_src'])
     if vocab_trg == None: vocab_trg = Vocab(filenames['train_trg'], min_freq=config['min_freq_trg'])
+
+    tf_start = None
+    tf_decrease = None
+    use_tf = config.get('use_tf', False)
+    if use_tf:
+        tf_start = config['tf_start']
+        tf_decrease = config['tf_decrease']
 
     if train_dataset==None: train_dataset = TranslationDataset(vocab_src, 
                                     vocab_trg, 
@@ -204,6 +224,11 @@ def train(config, filenames, folders, device='cuda', use_wandb=False, vocab_src=
     print(model)
 
     params_n = model.count_parameters()
+
+    print(f'Parameters: {params_n//1e+3}k')
+
+    config['parameters'] = params_n
+
     weights_filename = folders['weights'] + f"{config['model_name']}-{config['feature']}-{params_n // 1e+6}m-{config['num_epochs']}epoch.pt"
 
     if use_wandb: wandb.init(
@@ -216,43 +241,47 @@ def train(config, filenames, folders, device='cuda', use_wandb=False, vocab_src=
     val_losses = []
 
     teacher_forcing = 1.0
-    # teacher_forcing = 0.5
 
     for epoch in range(1, config['num_epochs']+1):
-        train_loss, val_loss = train_epoch(model, 
-                                           optimizer, 
-                                           train_loader, 
-                                           val_loader, 
-                                           criterion, 
-                                           vocab_trg, 
-                                           scheduler,
-                                           teacher_forcing=teacher_forcing)
+        train_loss, val_loss, val_loss_no_tf = train_epoch(model, 
+                                                            optimizer, 
+                                                            train_loader, 
+                                                            val_loader, 
+                                                            criterion, 
+                                                            vocab_trg, 
+                                                            scheduler,
+                                                            teacher_forcing=teacher_forcing)
         
         val_losses.append(train_loss)
         train_losses.append(val_loss)
 
         if use_wandb: 
             wandb.log({"train_loss": train_loss,
-                       "val_loss": val_loss, 
+                       "val_loss": val_loss,
+                       "val_loss_no_tf":  val_loss_no_tf,
                        "epoch": epoch,})
 
             if scheduler:
+                print('lr:', scheduler.get_last_lr()[0])
                 wandb.log({"lr": scheduler.get_last_lr()[0]})
 
         if epoch >= 6:
-            teacher_forcing = 0.7 - 0.05 * (epoch - 6)
+            if(use_tf): teacher_forcing = tf_start  - tf_decrease * (epoch - 6)
             checkpoint_path = f'lstm-save-{epoch}.pt'
-            model.save(checkpoint_path, folders['weights'])
+            model.save(checkpoint_path, folders['saves'])
             # if use_wandb: wandb.save(checkpoint_path)
-            if epoch%4 == 0:
-                try:
-                    bleu_score = get_bleu(model, val_loader, vocab_trg, filenames)
-                    print(f"BLEU4: {bleu_score}")
-                    if use_wandb: wandb.log({"BLEU4": bleu_score})
-                except:
-                    print('wrong bleu function')
+        
+        if epoch%3 == 0:
+            try:
+                bleu_score = get_bleu(model, val_loader, vocab_trg, filenames)
+                print(f"BLEU4: {bleu_score}")
+                if use_wandb: wandb.log({"BLEU4": bleu_score})
+            except:
+                print('wrong bleu function')
 
-        print(f"Epoch [{epoch}/{config['num_epochs']}]\tTrain Loss: {train_loss:.4f}\tVal Loss: {val_loss:.4f}")
+        model.demonstrate(train_loader, vocab_src, vocab_trg, examples=5, device=device, wait=0)
+
+        print(f"Epoch [{epoch}/{config['num_epochs']}]\tTrain Loss: {train_loss:.4f}\tVal Loss: {val_loss:.4f}\tVal loss no TF: {val_loss_no_tf:.4f}")
 
 
     model.train_loss = np.array(train_losses)
@@ -294,16 +323,20 @@ class LSTM_3(nn.Module):
             if not num_layers:
                 num_layers = config.get('num_layers', 2)
             if not enc_dropout:
-                enc_dropout = config.get('enc_dropout', 0.1)
+                enc_dropout = config.get('dropout_enc', 0.1)
             if not dec_dropout:
-                dec_dropout = config.get('dec_dropout', 0.1)
+                dec_dropout = config.get('dropout_dec', 0.1)
             if not emb_dropout:
-                emb_dropout = config.get('emb_dropout', 0.1)
+                emb_dropout = config.get('dropout_emb', 0.1)
             if not attention_dropout:
-                attention_dropout = config.get('attention_dropout', 0.1)
+                attention_dropout = config.get('dropout_attention', 0.1)
 
         self.num_layers = num_layers
         self.hidden_size = hidden_size
+
+        self.src_vocab_size = src_vocab_size
+
+        self.trg_vocab_size = trg_vocab_size
 
         self.src_embedding = nn.Embedding(src_vocab_size, embedding_dim, padding_idx=pad_idx)
         self.trg_embedding = nn.Embedding(trg_vocab_size, embedding_dim, padding_idx=pad_idx)
@@ -379,7 +412,6 @@ class LSTM_3(nn.Module):
 
         tf_mask = (torch.rand(batch_size, trg_len - 1, device=device) < teacher_forcing).long()
 
-        # print('no tf')
         # autoregressive decoding with teacher forcing
         for t in range(1, trg_len):  # skip <sos>
             trg_embedded = self.trg_embedding(decoder_input)  # (batch_size, 1, emb_dim)
@@ -500,15 +532,121 @@ class LSTM_3(nn.Module):
 
         return trg_seq
 
-    def demonstrate(self, val_loader, vocab_src, vocab_trg, examples=10, device='cuda'):
+    def inference_beam(self, src_seq, max_len=50, beam_width=3, device='cuda'):
+        unk_idx, pad_idx, bos_idx, eos_idx, num_idx = 0, 1, 2, 3, 4
+        self.eval()
+        batch_size = src_seq.size(0)
+        k = beam_width
+        # encoder forward
+        with torch.no_grad():
+            src_embedded = self.src_embedding(src_seq)  # (batch_size, seq_len, emb_dim)
+            encoder_outputs, (hidden, cell) = self.encoder(src_embedded)
+            encoder_outputs = self.encoder_output_proj(encoder_outputs)  # (batch_size, seq_len, hidden_dim)
+            encoder_outputs = encoder_outputs.contiguous()
+
+            hidden = self._project_hidden(hidden, self.encoder_hidden_proj)  # (num_layers, batch_size, hidden_dim)
+            cell = self._project_hidden(cell, self.encoder_cell_proj)
+
+        # expand encoder output for beams
+        encoder_outputs = encoder_outputs.unsqueeze(1).repeat(1, k, 1, 1)  # (batch_size, k, seq_len, hidden_dim)
+        encoder_outputs = encoder_outputs.view(batch_size * k, -1, encoder_outputs.size(-1))  # (batch_size*k, seq_len, hidden_dim)
+        encoder_outputs = encoder_outputs.view(batch_size * k, -1, encoder_outputs.size(-1))  # (batch_size*k, seq_len, hidden_dim)
+
+        hidden = hidden.unsqueeze(2).repeat(1, 1, k, 1)  # (num_layers, batch_size, k, hidden_dim)
+        hidden = hidden.view(hidden.size(0), -1, hidden.size(-1))  # (num_layers, batch_size*k, hidden_dim)
+        cell = cell.unsqueeze(2).repeat(1, 1, k, 1).view(hidden.size(0), -1, hidden.size(-1))
+
+        # init beams
+        beam_scores = torch.zeros((batch_size, k), dtype=torch.float, device=device)  # (batch_size, k)
+        beam_scores[:, 1:] = -1e10  # force beam 0 to be top 1
+
+        beam_tokens = torch.full((batch_size, k, 1), bos_idx, dtype=torch.long, device=device)  # (batch_size, k, 1)
+
+        num_layers = hidden.size(0)
+        vocab_size = self.trg_vocab_size
+        hidden_dim = hidden.size(-1)
+
+        for step in range(max_len):
+            flat_hidden = hidden  # (num_layers, batch_size*k, hidden_dim)
+            flat_cell = cell
+            flat_tokens = beam_tokens.view(batch_size * k, -1)  # (batch_size*k, seq_len)  
+
+            # decoder
+            current_trg = flat_tokens[:, -1].unsqueeze(1)  # (batch_size*k, 1)
+            trg_embedded = self.trg_embedding(current_trg)  # (batch_size*k, 1, emb_dim)
+            decoder_output, (new_hidden, new_cell) = self.decoder(trg_embedded, (flat_hidden, flat_cell))
+
+            mask = (src_seq != pad_idx).unsqueeze(1)  # (batch_size, 1, src_len)
+            mask = mask.repeat(k, 1, 1)
+            mask.size()
+
+            # attention + logits
+            energy = torch.bmm(decoder_output, encoder_outputs.transpose(1, 2))  # (batch_size*k, 1, seq_len)
+
+            energy = energy.masked_fill(mask == 0, -1e10)
+
+            attention = F.softmax(energy, dim=-1)
+            context = torch.bmm(attention, encoder_outputs)  # (batch_size*k, 1, hidden_dim)
+            combined = torch.cat([decoder_output, context], dim=2)
+            logits = self.fc(combined).squeeze(1)  # (batch_size*k, vocab_size)
+            logits[:, unk_idx] = -1e10  # Block <UNK>
+
+            # scores (log probs)
+            log_probs = F.log_softmax(logits, dim=-1)  # (batch_size*k, vocab_size)
+
+
+            next_scores = log_probs + beam_scores.view(-1, 1)  # (batch_size*k, vocab_size)
+
+            # reshape to (batch_size, k * vocab_size)
+            next_scores = next_scores.view(batch_size, k * vocab_size)
+
+            # topk candidates for each batch 
+            next_scores, next_tokens = torch.topk(next_scores, k, dim=1)  # log_probs: (batch_size, k), indices: (batch_size, k)
+
+            beam_indices = next_tokens // vocab_size  # what beam is token from
+            token_indices = next_tokens % vocab_size  # what token
+
+            # new scores
+            beam_scores = next_scores
+
+            # new beam tokens
+            beam_tokens = torch.cat([
+                beam_tokens[torch.arange(batch_size).unsqueeze(1), beam_indices],  # (batch_size, k) -> (batch_size, k, seq_len)
+                token_indices.unsqueeze(-1)
+            ], dim=-1)
+
+            # new hidden states
+            hidden = new_hidden.view(num_layers, batch_size, k, -1)  # (num_layers, batch_size, k, hidden_dim)
+
+            hidden = hidden.view(num_layers, -1, hidden_dim)  # (num_layers, batch_size*k, hidden_dim)
+
+
+            cell = new_cell.view(num_layers, batch_size, k, -1)  # (num_layers, batch_size, k, hidden_dim)
+
+            cell = cell.view(num_layers, -1, hidden_dim)
+
+            # early stopping
+            eos_mask = (token_indices == eos_idx)
+            if eos_mask.all():
+                break
+        trg_seq = beam_tokens[torch.arange(batch_size), beam_scores.argmax(dim=1)]  # (batch_size, seq_len)
+        return trg_seq
+
+    def demonstrate(self, val_loader, vocab_src, vocab_trg, examples=10, device='cuda', wait=3):
+        n = 0
         for batch_idx, (src, trg) in enumerate(val_loader):
             predictions = self.inference(src, device=device) # batch
+            predictions_beam = self.inference_beam(src, device=device) # batch
             for i in range(len(src)):
-                print(list(src[i]).index(eos_idx),list(trg[i]).index(eos_idx), list(predictions[i]).index(eos_idx))
-                print("src:\t", " ".join(vocab_src.decode(src[i])))
-                print("trg:\t", " ".join(vocab_trg.decode(trg[i])))
-                print("pred:\t", " ".join(vocab_trg.decode(predictions[i])))
-                sleep(3)
+                # print(list(src[i]).index(eos_idx),list(trg[i]).index(eos_idx), list(predictions[i]).index(eos_idx))
+                print("src:\t\t", " ".join(vocab_src.decode(src[i])))
+                print("trg:\t\t", " ".join(vocab_trg.decode(trg[i])))
+                print("pred:\t\t", " ".join(vocab_trg.decode(predictions[i])))
+                print("pred-beam:\t", " ".join(vocab_trg.decode(predictions_beam[i])))
+                n += 1
+                if n == examples:
+                    return
+                sleep(wait)
 
     def save(self, filename, folder):
         np.save(folder + 'train.npy', self.train_loss)

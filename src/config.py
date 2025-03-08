@@ -4,6 +4,7 @@ folders = {
 
 folders['data'] = folders['extract_to'] + 'data/'
 folders['weights'] = '../weights/'
+folders['saves'] = '../weights/saves/'
 folders['submission'] = '../submission/'
 
 filenames = {
