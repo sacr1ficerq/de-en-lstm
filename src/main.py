@@ -12,13 +12,13 @@ device = 'cuda'
 
 config = {
     'model_name': 'LSTM_3',
-    'feature': 'even-more-regularization',
+    'feature': 'back-to-origins',
     'max_len': 42,
     'min_freq_src': 5,
     'min_freq_trg': 5,
 
-    'embedding_dim': 120,
-    'hidden_size': 360,
+    'embedding_dim': 192,
+    'hidden_size': 320,
     'num_layers': 3,
 
     'num_epochs': 15,
@@ -30,9 +30,9 @@ config = {
     'dropout_enc': 0.4,
     'dropout_dec': 0.4,
 
-    'dropout_attention': 0.1,
+    'dropout_attention': 0.15,
 
-    'learning_rate': 1e-3,
+    'learning_rate': 8e-4,
     'gamma': 0.2,
     'patience': 1,
     'threshold': 5e-4,
@@ -47,7 +47,7 @@ config = {
 vocab_src = Vocab(filenames['train_src'], min_freq=config['min_freq_src'])
 vocab_trg = Vocab(filenames['train_trg'], min_freq=config['min_freq_trg'])
 
-# config['weights'] = '../weights/LSTM_3-more-dropout-hs360-30.0m-15epoch.pt'
+# config['weights'] = '../weights/saves/lstm-save-15.pt'
 
 train_dataset = TranslationDataset(vocab_src, 
                                 vocab_trg, 

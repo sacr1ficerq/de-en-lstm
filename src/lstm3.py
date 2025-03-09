@@ -486,7 +486,9 @@ class LSTM_3(nn.Module):
         logits = self.fc(combined)
         return logits
 
-    def inference(self, src_seq, max_len=50, device='cuda'):
+    def inference(self, src_seq, max_len=None, device='cuda'):
+        if max_len == None:
+            max_len = int(src_seq.size(1) * 1.5 + 1)
         self.eval()
 
         batch_size = src_seq.size(0)
@@ -543,18 +545,19 @@ class LSTM_3(nn.Module):
 
         return trg_seq
 
-    def inference_beam(self, src_seq, max_len=70, beam_width=5, remove_unk=True, lens=None, 
-                       device='cuda', verbose=False, vocab_trg=None, vocab_src=None):
+    def inference_beam(self, src_seq, max_len=None, beam_width=5, remove_unk=True, lens=None, 
+                       device='cuda', verbose=0, vocab_trg=None, vocab_src=None, border=0.0):
         unk_idx, pad_idx, bos_idx, eos_idx, num_idx = 0, 1, 2, 3, 4
-        if max_len == -1:
-            max_len = src_seq.size(1) + 3
         
+        if max_len == None:
+            max_len = int(src_seq.size(1) * 1.5 + 1)
+
         self.eval()
         batch_size = src_seq.size(0)
         k = beam_width
-        alpha = 0.7  # penalty
+        alpha = 0.5  # penalty
 
-        if verbose: print(f'k: {k}\tB: {batch_size}\tmax_len: {max_len}')
+        if verbose > 1: print(f'k: {k}\tB: {batch_size}\tmax_len: {max_len}')
 
         # encoder forward
         with torch.no_grad():
@@ -589,17 +592,17 @@ class LSTM_3(nn.Module):
         hidden_dim = hidden.size(-1)
 
         for step in range(max_len):
-            if verbose: print(f'\nstep:{step}')
+            if verbose > 1: print(f'\nstep:{step}')
             flat_hidden = hidden  # (num_layers, batch_size*k, hidden_dim)
             flat_cell = cell
             flat_tokens = beam_tokens.view(batch_size * k, -1)  # (batch_size*k, seq_len)  
             flat_token_scores = token_scores.view(batch_size * k, -1)  # (batch_size*k, seq_len)  
 
-            def pretty_print(row, width=6):
+            def pretty_print(row, width=5):
                 print(" | ".join(f"{str(item):<{width}}" for item in row))
 
             def display_src(line):
-                return " ".join(map(vocab_src.decode_idx, line))      
+                pretty_print(map(vocab_src.decode_idx, line))      
 
             def display_trg(line):
                 pretty_print(list(map(vocab_trg.decode_idx, line)))
@@ -652,7 +655,6 @@ class LSTM_3(nn.Module):
 
             next_scores = log_probs + beam_scores.view(-1, 1)  # (batch_size*k, vocab_size)
 
-
             # reshape to (batch_size, k * vocab_size)
             next_scores = next_scores.view(batch_size, k * vocab_size)
 
@@ -662,7 +664,7 @@ class LSTM_3(nn.Module):
             beam_indices = next_tokens // vocab_size  # what beam is token from
             token_indices = next_tokens % vocab_size  # what token
 
-            if verbose:
+            if verbose > 1:
                 print('beam tokens:')
                 display_beams(beam_tokens, beam_scores, token_scores)
 
@@ -672,7 +674,7 @@ class LSTM_3(nn.Module):
             # new token scores
             token_scores = torch.cat([
                 token_scores[torch.arange(batch_size).unsqueeze(1), beam_indices],  # (batch_size, k) -> (batch_size, k, seq_len)
-                next_scores.unsqueeze(-1) - current_token_scores
+                next_scores.unsqueeze(-1) - current_token_scores.view(batch_size, k, -1)
             ], dim=-1)
 
             # new beam tokens
@@ -695,28 +697,33 @@ class LSTM_3(nn.Module):
                 break
 
         # Select best beam with highest normalized score
-        final_scores = beam_scores / (beam_lengths.float() ** alpha)
+        final_scores = beam_scores / (beam_lengths.float() * alpha)
         # final_scores = beam_scores
         best_indices = final_scores.argmax(dim=1)
         trg_seq = beam_tokens[torch.arange(batch_size), best_indices]
         trg_seq_scores = token_scores[torch.arange(batch_size), best_indices]
 
-        if verbose:
+        if verbose>0:
             for i in range(batch_size):
                 print('result:')
                 display_trg(trg_seq[i])
                 print('token scores:')
                 display_probs(trg_seq_scores[i])
 
+
+        if border > 0.0:
+            trg_seq = trg_seq.masked_fill(trg_seq_scores < np.log(border), pad_idx) # 1d
+
         return trg_seq
 
-    def demonstrate(self, val_loader, vocab_src, vocab_trg, examples=10, device='cuda', wait=3):
+    def demonstrate(self, val_loader, vocab_src, vocab_trg, examples=10, device='cuda', wait=3, verbose=1):
         from submission import bleu
         
         n = 0
         for batch_idx, (src, trg) in enumerate(val_loader):
             predictions = self.inference(src, device=device) # batch
-            predictions_beam = self.inference_beam(src, remove_unk=False, device=device) # batch
+            predictions_beam = self.inference_beam(src, remove_unk=False, 
+                                                   device=device, vocab_src=vocab_src, vocab_trg=vocab_trg, verbose=verbose) # batch
             for i in range(len(src)):
                 # print(list(src[i]).index(eos_idx), list(trg[i]).index(eos_idx), list(predictions[i]).index(eos_idx), list(predictions_beam[i]).index(eos_idx))
                 
@@ -730,9 +737,10 @@ class LSTM_3(nn.Module):
                 print("pred:\t\t", " ".join(c1))
                 print("pred-beam:\t", " ".join(c2))
 
-                print(f'bleu:\t\t{bleu(ref=r, c=c1, verbose=True):0.2f}')
-                print(f'bleu beam:\t{bleu(ref=r, c=c2, verbose=True):0.2f}')
+                print(f'bleu:\t\t{bleu(ref=r, c=c1, verbose=0):0.2f}')
+                print(f'bleu beam:\t{bleu(ref=r, c=c2, verbose=0):0.2f}')
                 print()
+                torch.cuda.ipc_collect()
                 n += 1
                 if n == examples:
                     return

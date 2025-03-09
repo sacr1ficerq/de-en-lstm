@@ -89,6 +89,7 @@ class Vocab():
         has_num = False
         nums_idxs = []
         i = 0
+        # if len(idxs) == 0: return []
         for idx in idxs:
             if i != 0 and idxs[i-1] == idxs[i]: continue 
             if idx == eos_idx:
@@ -105,6 +106,7 @@ class Vocab():
                 if len(nums_src) <= t:
                     break
                 result[idx] = nums_src[t]
+        # if len(result) == 0: return result
         return list(filter(lambda word: not word in ignore, result))
 
     def __len__(self):
