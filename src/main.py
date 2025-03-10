@@ -1,9 +1,9 @@
-from lstm3 import train
+from train import train
 
 from config import filenames, folders
 
 from matplotlib import pyplot as plt
-from dataset import Vocab, TranslationDataset
+from dataset2 import Vocab, TranslationDataset
 
 import psutil
 import os
@@ -12,30 +12,32 @@ device = 'cuda'
 
 config = {
     'model_name': 'LSTM_3',
-    'feature': 'back-to-origins',
+    'feature': 'max-regularization',
     'max_len': 42,
     'min_freq_src': 5,
     'min_freq_trg': 5,
 
     'embedding_dim': 192,
-    'hidden_size': 320,
+    'hidden_size': 384,
     'num_layers': 3,
 
     'num_epochs': 15,
-    'weight_decay': 2e-5,
-    'label_smoothing': 0.1,
+    'weight_decay': 1e-3,
+    'label_smoothing': 0.3,
 
-    'dropout_emb': 0.2,
+    'dropout_emb': 0.12,
 
-    'dropout_enc': 0.4,
-    'dropout_dec': 0.4,
+    'dropout_enc': 0.25,
+    'dropout_dec': 0.25,
 
-    'dropout_attention': 0.15,
+    'dropout_attention': 0.1,
 
-    'learning_rate': 8e-4,
+    'learning_rate': 1e-3,
+    'lr_manual_decrease': False,
+    'amsgrad': False,
     'gamma': 0.2,
     'patience': 1,
-    'threshold': 5e-4,
+    'threshold': 8e-4,
     'batch_size': 128,
 
     'use_tf': False,
@@ -47,7 +49,7 @@ config = {
 vocab_src = Vocab(filenames['train_src'], min_freq=config['min_freq_src'])
 vocab_trg = Vocab(filenames['train_trg'], min_freq=config['min_freq_trg'])
 
-# config['weights'] = '../weights/saves/lstm-save-15.pt'
+# config['weights'] = '../weights/saves/lstm-save-5.pt'
 
 train_dataset = TranslationDataset(vocab_src, 
                                 vocab_trg, 
@@ -86,7 +88,7 @@ if __name__ == "__main__":
     train_losses, val_losses = train(config=config, 
                                      filenames=filenames, 
                                      folders=folders, 
-                                     use_wandb=True, 
+                                     use_wandb=False, 
                                      device=device, 
                                      vocab_src=vocab_src,
                                      vocab_trg=vocab_trg,

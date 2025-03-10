@@ -121,6 +121,9 @@ def get_bleu(model, dataloader, vocab_trg, raw_dataset, use_beam=False, beam_wid
                 pred_text = vocab_trg.decode(predictions[i], ignore=no_unk, src=ref)
                 penalties += penalty(len(ref), len(pred_text))
                 c, t = get_precisions(ref, pred_text)
+                b = bleu(ref, pred_text)
+                if b < 7:
+                    pass # TODO: handle bad training data seperatly, or inspect predictions
                 correct += c
                 total += t
                 len_ref += list(trg[i]).index(eos_idx) - 1
@@ -136,9 +139,9 @@ def get_bleu(model, dataloader, vocab_trg, raw_dataset, use_beam=False, beam_wid
     print('correct:\t', *map(int, correct))
     print('total:\t\t', *map(int, total))
     bp = penalty(len_ref, len_pred)
-    bleu = np.round(bleu_from_precision(correct, total, bp, verbose=True), 2)
+    result = np.round(bleu_from_precision(correct, total, bp, verbose=True), 2)
 
-    return bleu
+    return result
 
 
 def make_submission(model, submission_loader, vocab_trg, filenames, raw_dataset, use_beam=False, beam_width=5, device='cuda'):

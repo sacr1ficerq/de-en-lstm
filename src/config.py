@@ -15,4 +15,6 @@ filenames = {
     'test_pred': folders['submission'] + 'val_pred.en',
     'submission_src': folders['data'] + 'test1.de-en.de',
     'submission_trg': folders['submission'] + 'submission.en',
+    'low_bleu_src': folders['submission'] + 'low_bleu.de',
+    'low_bleu_trg': folders['submission'] + 'low_bleu.en'
 }

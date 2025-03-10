@@ -1,6 +1,3 @@
-from submission import get_bleu
-from dataset import TranslationDataset, Vocab, TrainDataLoader, TestDataLoader
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,8 +9,6 @@ from time import sleep
 from tqdm import tqdm
 
 import numpy as np
-
-import wandb
 
 unk_idx, pad_idx, bos_idx, eos_idx = 0, 1, 2, 3
 
@@ -115,193 +110,6 @@ def profile(config, filenames, vocab_src, vocab_trg, train_dataset, val_dataset)
 
     return
 
-def train_epoch(model, optimizer, train_loader, val_loader, criterion, vocab_trg, scheduler, teacher_forcing=1):
-    model.train()
-    total_train_loss = 0
-
-    for src_seq, trg_seq in tqdm(train_loader):
-        trg_input = trg_seq[:, :-1]
-        trg_output = trg_seq[:, 1:]
-
-        logits = model(src_seq, trg_input, teacher_forcing=teacher_forcing)
-        # logits = model.forward_no_tf(src_seq, trg_input)
-        logits = logits.view(-1, len(vocab_trg))
-        trg_output = trg_output.reshape(-1)
-
-        loss = criterion(logits, trg_output)
-        total_train_loss += loss.item()
-
-        optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
-
-    model.eval()
-    total_val_loss = 0
-    total_val_loss_no_tf = 0
-    with torch.no_grad():
-        for src_seq, trg_seq in tqdm(val_loader):
-            trg_input = trg_seq[:, :-1]
-            trg_output = trg_seq[:, 1:]
-
-            # logits = model.forward_no_tf(src_seq, trg_input)
-            logits = model(src_seq, trg_input, teacher_forcing=1.0)
-            logits = logits.view(-1, len(vocab_trg))
-            trg_output = trg_output.reshape(-1)
-
-            loss = criterion(logits, trg_output)
-            total_val_loss += loss.item()
-
-        for src_seq, trg_seq in tqdm(val_loader):
-            trg_input = trg_seq[:, :-1]
-            trg_output = trg_seq[:, 1:]
-
-            # logits = model.forward_no_tf(src_seq, trg_input)
-            logits = model(src_seq, trg_input, teacher_forcing=0.0)
-            logits = logits.view(-1, len(vocab_trg))
-            trg_output = trg_output.reshape(-1)
-
-            loss = criterion(logits, trg_output)
-            total_val_loss_no_tf += loss.item()
-
-    avg_val_loss = total_val_loss / len(val_loader)
-    avg_val_loss_no_tf = total_val_loss_no_tf / len(val_loader)
-    avg_train_loss = total_train_loss / len(train_loader)
-
-    if scheduler:
-        scheduler.step(avg_val_loss)
-
-    return avg_train_loss, avg_val_loss, avg_val_loss_no_tf
-
-def train(config, filenames, folders, device='cuda', use_wandb=False, vocab_src=None, vocab_trg=None, train_dataset=None, val_dataset=None):
-    if vocab_src == None: vocab_src = Vocab(filenames['train_src'], min_freq=config['min_freq_src'])
-    if vocab_trg == None: vocab_trg = Vocab(filenames['train_trg'], min_freq=config['min_freq_trg'])
-
-    tf_start = None
-    tf_decrease = None
-    tf_from_epoch = None
-    use_tf = config.get('use_tf', False)
-
-    if use_tf:
-        tf_start = config['tf_start']
-        tf_decrease = config['tf_decrease']        
-        tf_from_epoch = config['tf_from_epoch']
-
-    if train_dataset==None: train_dataset = TranslationDataset(vocab_src, 
-                                    vocab_trg, 
-                                    filenames['train_src'], 
-                                    filenames['train_trg'], 
-                                    max_len=config['max_len'], 
-                                    device=device)
-
-    if val_dataset==None: val_dataset = TranslationDataset(vocab_src, 
-                                    vocab_trg, 
-                                    filenames['test_src'], 
-                                    filenames['test_trg'], 
-                                    max_len=72, 
-                                    device=device, 
-                                    sort_lengths=False)
-
-    unk_idx, pad_idx, bos_idx, eos_idx = 0, 1, 2, 3
-
-    train_loader = TrainDataLoader(train_dataset, batch_size=config.get('batch_size', 128), shuffle=True)
-    val_loader = TestDataLoader(val_dataset, batch_size=256, shuffle=False)
-
-    config['src_vocab_size'] = len(vocab_src)
-    config['trg_vocab_size'] = len(vocab_trg)
-
-    model = LSTM_3(config=config).to(device)
-
-    criterion = nn.CrossEntropyLoss(ignore_index=pad_idx, 
-                                    label_smoothing=config['label_smoothing'])
-
-    optimizer = optim.AdamW(model.parameters(), 
-                            lr=config['learning_rate'], 
-                            weight_decay=config['weight_decay'])
-    scheduler = ReduceLROnPlateau(optimizer, 
-                                patience=config['patience'], 
-                                factor=config['gamma'], 
-                                threshold=config['threshold'])
-
-    from dataset import RawDataset
-    raw_dataset = RawDataset(filenames['test_trg'])
-
-    print(model)
-    params_n = model.count_parameters()
-    print(f'Parameters: {params_n//1e+3}k')
-    config['parameters'] = params_n
-
-    weights_filename = folders['weights'] + f"{config['model_name']}-{config['feature']}-{params_n // 1e+6}m-{config['num_epochs']}epoch.pt"
-
-    bleu_score = get_bleu(model, val_loader, vocab_trg, raw_dataset)
-    bleu_score_beam = get_bleu(model, val_loader, vocab_trg, raw_dataset, use_beam=True)
-
-    model.demonstrate(train_loader, vocab_src, vocab_trg, examples=5, device=device, wait=0)
-    print(f"Start BLEU4: {bleu_score}")
-    print(f"Start BLEU4-beam: {bleu_score_beam}")
-
-    if use_wandb: wandb.init(
-        project="bhw2",
-        config=config
-    )
-
-    # if use_wandb: wandb.watch(model, log="parameters", log_freq=10)
-    train_losses = []
-    val_losses = []
-
-    teacher_forcing = 1.0
-
-    for epoch in range(1, config['num_epochs']+1):
-        if use_tf:
-            if epoch >= tf_from_epoch:
-                teacher_forcing = tf_start  - tf_decrease * (epoch - tf_from_epoch)
-
-        train_loss, val_loss, val_loss_no_tf = train_epoch(model, 
-                                                            optimizer, 
-                                                            train_loader, 
-                                                            val_loader, 
-                                                            criterion, 
-                                                            vocab_trg, 
-                                                            scheduler,
-                                                            teacher_forcing=teacher_forcing)
-        
-        val_losses.append(train_loss)
-        train_losses.append(val_loss)
-
-        if use_wandb: 
-            wandb.log({"train_loss": train_loss,
-                       "val_loss": val_loss,
-                       "val_loss_no_tf":  val_loss_no_tf,
-                       "epoch": epoch,})
-
-            if scheduler:
-                print('lr:', scheduler.get_last_lr()[0])
-                wandb.log({"lr": scheduler.get_last_lr()[0]})
-
-
-        if epoch >= 6:
-            checkpoint_path = f'lstm-save-{epoch}.pt'
-            model.save(checkpoint_path, folders['saves'])
-            # if use_wandb: wandb.save(checkpoint_path)
-
-        bleu_score = get_bleu(model, val_loader, vocab_trg, raw_dataset)
-        bleu_score_beam = get_bleu(model, val_loader, vocab_trg, raw_dataset, use_beam=True)
-        if use_wandb: wandb.log({"BLEU4": bleu_score, "BLEU4-beam": bleu_score_beam})
-
-        model.demonstrate(train_loader, vocab_src, vocab_trg, examples=5, device=device, wait=0)
-
-        print(f"Epoch [{epoch}/{config['num_epochs']}]\tTrain Loss: {train_loss:.4f}\tVal Loss: {val_loss:.4f}\tVal loss no TF: {val_loss_no_tf:.4f}")
-        print(f"BLEU4: {bleu_score}")
-        print(f"BLEU4-beam: {bleu_score_beam}")
-
-    model.train_loss = np.array(train_losses)
-    model.val_loss = np.array(val_losses)
-
-    model.save(weights_filename, folders['weights'])
-    wandb.finish()
-
-    return train_losses, val_losses
-
 class LSTM_3(nn.Module):
     def __init__(self, 
                  src_vocab_size=None, 
@@ -353,12 +161,12 @@ class LSTM_3(nn.Module):
         self.src_embedding = nn.Embedding(src_vocab_size, embedding_dim, padding_idx=pad_idx)
         self.trg_embedding = nn.Embedding(trg_vocab_size, embedding_dim, padding_idx=pad_idx)
 
-        self.emb_dropout = nn.Dropout(emb_dropout, inplace=True)
+        self.emb_dropout = nn.Dropout(emb_dropout, inplace=False)
 
-        self.enc_dropout = nn.Dropout(enc_dropout, inplace=True)
-        self.dec_dropout = nn.Dropout(dec_dropout, inplace=True)
+        self.enc_dropout = nn.Dropout(enc_dropout, inplace=False)
+        self.dec_dropout = nn.Dropout(dec_dropout, inplace=False)
 
-        self.attention_dropout = nn.Dropout(attention_dropout, inplace=True)
+        self.attention_dropout = nn.Dropout(attention_dropout, inplace=False)
 
         self.encoder = nn.LSTM(embedding_dim, 
                                hidden_size, 
@@ -384,6 +192,13 @@ class LSTM_3(nn.Module):
 
         self.fc = nn.Linear(hidden_size * 2, trg_vocab_size)
 
+        self.emb_layer_norm = nn.LayerNorm(embedding_dim)
+        self.encoder_output_norm = nn.LayerNorm(hidden_size)
+        self.decoder_output_norm = nn.LayerNorm(hidden_size)
+
+        self.proj_layer_norm = nn.LayerNorm(hidden_size)      # not added to training/inference yet
+        # self.attention_norm = nn.LayerNorm(hidden_size)       # not added to training/inference yet
+
         # xavier
         for name, param in self.named_parameters():
             if "weight" in name and "embedding" not in name:
@@ -399,11 +214,13 @@ class LSTM_3(nn.Module):
         batch_size = state.size(1)
         state = state.view(self.num_layers, 2, batch_size, self.hidden_size)
         state = torch.cat([state[:, 0], state[:, 1]], dim=2)  # (num_layers, batch, 2*hidden_size)
-        return torch.stack([proj_layers[i](state[i]) for i in range(self.num_layers)], dim=0)
+        return torch.stack([self.proj_layer_norm(proj_layers[i](state[i])) for i in range(self.num_layers)], dim=0)
 
     def forward(self, src_seq, trg_seq, device='cuda', teacher_forcing=1.0):
         if teacher_forcing == 1.0: return self.forward_no_tf(src_seq, trg_seq)
         src_embedded = self.emb_dropout(self.src_embedding(src_seq)) # (batch_size, src_len, embedding_dim)
+        src_embedded = self.emb_layer_norm(src_embedded)
+        src_embedded = self.emb_dropout(src_embedded)
 
         encoder_outputs, (hidden, cell) = self.encoder(src_embedded)  # hidden/cell: (1, batch_size, hidden_size)
         encoder_outputs = self.encoder_output_proj(encoder_outputs)
@@ -462,15 +279,24 @@ class LSTM_3(nn.Module):
 
     def forward_no_tf(self, src_seq, trg_seq, device='cuda'):
         src_embedded = self.src_embedding(src_seq) # (batch_size, src_len, embedding_dim)
+        src_embedded = self.emb_layer_norm(src_embedded)
+        src_embedded = self.emb_dropout(src_embedded)
 
         encoder_outputs, (hidden, cell) = self.encoder(src_embedded)  # hidden/cell: (1, batch_size, hidden_size)
         encoder_outputs = self.encoder_output_proj(encoder_outputs)
+        encoder_outputs = self.encoder_output_norm(encoder_outputs)
+        encoder_outputs = self.enc_dropout(encoder_outputs)
 
         hidden = self._project_hidden(hidden, self.encoder_hidden_proj)
         cell = self._project_hidden(cell, self.encoder_cell_proj)
 
         trg_embedded = self.trg_embedding(trg_seq) # (batch_size, trg_len, embedding_dim)
+        trg_embedded = self.emb_layer_norm(trg_embedded)
+        trg_embedded = self.emb_dropout(trg_embedded)
+
         decoder_outputs, _ = self.decoder(trg_embedded, (hidden, cell))  # (batch_size, trg_len, hidden_size)
+        decoder_outputs = self.decoder_output_norm(decoder_outputs)
+        decoder_outputs = self.dec_dropout(decoder_outputs)
 
         # attention
         energy = torch.bmm(decoder_outputs, encoder_outputs.transpose(1, 2))
@@ -479,6 +305,7 @@ class LSTM_3(nn.Module):
         energy = energy.masked_fill(mask == 0, -1e10)
 
         attention = F.softmax(energy, dim=-1)
+        attention = self.attention_dropout(attention)
 
         context = torch.bmm(attention, encoder_outputs)
         combined = torch.cat([decoder_outputs, context], dim=2)
@@ -498,10 +325,14 @@ class LSTM_3(nn.Module):
         with torch.no_grad():
             # encoder forward
             src_embedded = self.src_embedding(src_seq)
+            src_embedded = self.emb_layer_norm(src_embedded)
+
             encoder_outputs, (hidden, cell) = self.encoder(src_embedded) # (B, max_len, H)
             # print('Encoder norm:', torch.norm(encoder_outputs[0, :20, :], 2))
 
             encoder_outputs = self.encoder_output_proj(encoder_outputs)
+            encoder_outputs = self.encoder_output_norm(encoder_outputs)
+
             # encoder_outputs = encoder_outputs.contiguous()  # ensure contiguous
             encoder_outputs_t = encoder_outputs.transpose(1, 2) # (B, max_len, 2 * H) 
             
@@ -517,8 +348,11 @@ class LSTM_3(nn.Module):
                 current_trg = trg_seq[:, -1].unsqueeze(1)
                 # print('trg: ', *current_trg[0])
                 trg_embedded = self.trg_embedding(current_trg)  # (batch_size, 1, emb_dim)
-                
+                trg_embedded = self.emb_layer_norm(trg_embedded)
+
                 decoder_output, (hidden, cell) = self.decoder(trg_embedded, (hidden, cell))
+                decoder_output = self.decoder_output_norm(decoder_output)
+                
                 # print('Decoder norm:', torch.norm(decoder_output[0, :, :], 2))
 
                 # energy = torch.bmm(decoder_output, encoder_outputs.transpose(1, 2).contiguous())
@@ -570,153 +404,153 @@ class LSTM_3(nn.Module):
             cell = self._project_hidden(cell, self.encoder_cell_proj)
 
         # expand encoder output for beams
-        encoder_outputs = encoder_outputs.unsqueeze(1).repeat(1, k, 1, 1)  # (batch_size, k, seq_len, hidden_dim)
-        encoder_outputs = encoder_outputs.view(batch_size * k, -1, encoder_outputs.size(-1))  # (batch_size*k, seq_len, hidden_dim)
+            encoder_outputs = encoder_outputs.unsqueeze(1).repeat(1, k, 1, 1)  # (batch_size, k, seq_len, hidden_dim)
+            encoder_outputs = encoder_outputs.view(batch_size * k, -1, encoder_outputs.size(-1))  # (batch_size*k, seq_len, hidden_dim)
 
-        hidden = hidden.unsqueeze(2).repeat(1, 1, k, 1)  # (num_layers, batch_size, k, hidden_dim)
-        hidden = hidden.view(hidden.size(0), -1, hidden.size(-1))  # (num_layers, batch_size*k, hidden_dim)
-        cell = cell.unsqueeze(2).repeat(1, 1, k, 1).view(hidden.size(0), -1, hidden.size(-1))
+            hidden = hidden.unsqueeze(2).repeat(1, 1, k, 1)  # (num_layers, batch_size, k, hidden_dim)
+            hidden = hidden.view(hidden.size(0), -1, hidden.size(-1))  # (num_layers, batch_size*k, hidden_dim)
+            cell = cell.unsqueeze(2).repeat(1, 1, k, 1).view(hidden.size(0), -1, hidden.size(-1))
 
-        # init beams
-        beam_scores = torch.zeros((batch_size, k), dtype=torch.float, device=device)  # (batch_size, k)
-        beam_scores[:, 1:] = -1e10  # force beam 0 to be top 1
+            # init beams
+            beam_scores = torch.zeros((batch_size, k), dtype=torch.float, device=device)  # (batch_size, k)
+            beam_scores[:, 1:] = -1e10  # force beam 0 to be top 1
 
-        beam_tokens = torch.full((batch_size, k, 1), bos_idx, dtype=torch.long, device=device)  # (batch_size, k, 1)
-        token_scores = torch.full((batch_size, k, 1), 0, dtype=torch.long, device=device)  # (batch_size, k, 1)
+            beam_tokens = torch.full((batch_size, k, 1), bos_idx, dtype=torch.long, device=device)  # (batch_size, k, 1)
+            token_scores = torch.full((batch_size, k, 1), 0, dtype=torch.long, device=device)  # (batch_size, k, 1)
 
-        beam_lengths = torch.ones((batch_size, k), dtype=torch.long, device=device)
-        finished = torch.zeros((batch_size, k), dtype=torch.bool, device=device)
+            beam_lengths = torch.ones((batch_size, k), dtype=torch.long, device=device)
+            finished = torch.zeros((batch_size, k), dtype=torch.bool, device=device)
 
-        num_layers = hidden.size(0)
-        vocab_size = self.trg_vocab_size
-        hidden_dim = hidden.size(-1)
+            num_layers = hidden.size(0)
+            vocab_size = self.trg_vocab_size
+            hidden_dim = hidden.size(-1)
 
-        for step in range(max_len):
-            if verbose > 1: print(f'\nstep:{step}')
-            flat_hidden = hidden  # (num_layers, batch_size*k, hidden_dim)
-            flat_cell = cell
-            flat_tokens = beam_tokens.view(batch_size * k, -1)  # (batch_size*k, seq_len)  
-            flat_token_scores = token_scores.view(batch_size * k, -1)  # (batch_size*k, seq_len)  
+            for step in range(max_len):
+                if verbose > 1: print(f'\nstep:{step}')
+                flat_hidden = hidden  # (num_layers, batch_size*k, hidden_dim)
+                flat_cell = cell
+                flat_tokens = beam_tokens.view(batch_size * k, -1)  # (batch_size*k, seq_len)  
+                flat_token_scores = token_scores.view(batch_size * k, -1)  # (batch_size*k, seq_len)  
 
-            def pretty_print(row, width=5):
-                print(" | ".join(f"{str(item):<{width}}" for item in row))
+                def pretty_print(row, width=5):
+                    print(" | ".join(f"{str(item):<{width}}" for item in row))
 
-            def display_src(line):
-                pretty_print(map(vocab_src.decode_idx, line))      
+                def display_src(line):
+                    pretty_print(map(vocab_src.decode_idx, line))      
 
-            def display_trg(line):
-                pretty_print(list(map(vocab_trg.decode_idx, line)))
+                def display_trg(line):
+                    pretty_print(list(map(vocab_trg.decode_idx, line)))
 
-            def get_array(tnsr):
-                return np.round(tnsr.detach().cpu().numpy(), 1)
+                def get_array(tnsr):
+                    return np.round(tnsr.detach().cpu().numpy(), 1)
 
-            def display_probs(tnsr):
-                log_probs = get_array(tnsr)
-                ps = np.round(np.exp(log_probs)*100, 2)
-                pretty_print(ps)
+                def display_probs(tnsr):
+                    log_probs = get_array(tnsr)
+                    ps = np.round(np.exp(log_probs)*100, 2)
+                    pretty_print(ps)
 
-            def display_beams(beams, scores, log_probs):
+                def display_beams(beams, scores, log_probs):
+                    for i in range(batch_size):
+                        display_src(src_seq[i])
+                        print(f'index in batch: {i}')
+                        probs = np.exp(get_array(scores[i]))
+                        pretty_print(probs)
+                        print()
+                        for j, line in enumerate(get_array(beams[i])):
+                            print(f'\tbeam probability: {probs[j]*100:0.2f}')
+                            display_trg(line)
+                            display_probs(log_probs[i, j])
+                        print()
+
+
+                # decoder
+                current_trg = flat_tokens[:, -1].unsqueeze(1)  # (batch_size*k, 1)
+                trg_embedded = self.trg_embedding(current_trg)  # (batch_size*k, 1, emb_dim)
+                decoder_output, (new_hidden, new_cell) = self.decoder(trg_embedded, (flat_hidden, flat_cell))
+
+                current_token_scores = flat_token_scores[:, -1].unsqueeze(1) # (batch_size*k, 1)
+
+                mask = (src_seq != pad_idx).unsqueeze(1)  # (batch_size, 1, src_len)
+                mask = mask.repeat(k, 1, 1)
+                mask.size()
+
+                # attention + logits
+                energy = torch.bmm(decoder_output, encoder_outputs.transpose(1, 2))  # (batch_size*k, 1, seq_len)
+                energy = energy.masked_fill(mask == 0, -1e10)
+
+                attention = F.softmax(energy, dim=-1)
+                context = torch.bmm(attention, encoder_outputs)  # (batch_size*k, 1, hidden_dim)
+                combined = torch.cat([decoder_output, context], dim=2)
+                logits = self.fc(combined).squeeze(1)  # (batch_size*k, vocab_size)
+                if remove_unk: logits[:, unk_idx] = -1e10  # Block <UNK>
+
+                # scores (log probs)
+                log_probs = F.log_softmax(logits, dim=-1)  # (batch_size*k, vocab_size)
+
+                next_scores = log_probs + beam_scores.view(-1, 1)  # (batch_size*k, vocab_size)
+
+                # reshape to (batch_size, k * vocab_size)
+                next_scores = next_scores.view(batch_size, k * vocab_size)
+
+                # topk candidates for each batch 
+                next_scores, next_tokens = torch.topk(next_scores, k, dim=1)  # log_probs: (batch_size, k), indices: (batch_size, k)
+
+                beam_indices = next_tokens // vocab_size  # what beam is token from
+                token_indices = next_tokens % vocab_size  # what token
+
+                if verbose > 1:
+                    print('beam tokens:')
+                    display_beams(beam_tokens, beam_scores, token_scores)
+
+                # new scores
+                beam_scores = next_scores
+
+                # new token scores
+                token_scores = torch.cat([
+                    token_scores[torch.arange(batch_size).unsqueeze(1), beam_indices],  # (batch_size, k) -> (batch_size, k, seq_len)
+                    next_scores.unsqueeze(-1) - current_token_scores.view(batch_size, k, -1)
+                ], dim=-1)
+
+                # new beam tokens
+                beam_tokens = torch.cat([
+                    beam_tokens[torch.arange(batch_size).unsqueeze(1), beam_indices],  # (batch_size, k) -> (batch_size, k, seq_len)
+                    token_indices.unsqueeze(-1)
+                ], dim=-1)
+
+                # new hidden states
+                hidden = new_hidden.view(num_layers, batch_size, k, -1)  # (num_layers, batch_size, k, hidden_dim)
+                hidden = hidden.view(num_layers, -1, hidden_dim)  # (num_layers, batch_size*k, hidden_dim)
+
+                cell = new_cell.view(num_layers, batch_size, k, -1)  # (num_layers, batch_size, k, hidden_dim)
+                cell = cell.view(num_layers, -1, hidden_dim)
+
+                # early stopping
+                new_finished = (token_indices == eos_idx)
+                finished = finished.gather(1, beam_indices) | new_finished
+                if finished.all():
+                    break
+
+            # Select best beam with highest normalized score
+            final_scores = beam_scores / (beam_lengths.float() * alpha)
+            # final_scores = beam_scores
+            best_indices = final_scores.argmax(dim=1)
+            trg_seq = beam_tokens[torch.arange(batch_size), best_indices]
+            trg_seq_scores = token_scores[torch.arange(batch_size), best_indices]
+
+            if verbose>0:
                 for i in range(batch_size):
-                    display_src(src_seq[i])
-                    print(f'index in batch: {i}')
-                    probs = np.exp(get_array(scores[i]))
-                    pretty_print(probs)
-                    print()
-                    for j, line in enumerate(get_array(beams[i])):
-                        print(f'\tbeam probability: {probs[j]*100:0.2f}')
-                        display_trg(line)
-                        display_probs(log_probs[i, j])
-                    print()
+                    print('result:')
+                    display_trg(trg_seq[i])
+                    print('token scores:')
+                    display_probs(trg_seq_scores[i])
 
 
-            # decoder
-            current_trg = flat_tokens[:, -1].unsqueeze(1)  # (batch_size*k, 1)
-            trg_embedded = self.trg_embedding(current_trg)  # (batch_size*k, 1, emb_dim)
-            decoder_output, (new_hidden, new_cell) = self.decoder(trg_embedded, (flat_hidden, flat_cell))
+            if border > 0.0:
+                trg_seq = trg_seq.masked_fill(trg_seq_scores < np.log(border), pad_idx) # 1d
 
-            current_token_scores = flat_token_scores[:, -1].unsqueeze(1) # (batch_size*k, 1)
+            return trg_seq
 
-            mask = (src_seq != pad_idx).unsqueeze(1)  # (batch_size, 1, src_len)
-            mask = mask.repeat(k, 1, 1)
-            mask.size()
-
-            # attention + logits
-            energy = torch.bmm(decoder_output, encoder_outputs.transpose(1, 2))  # (batch_size*k, 1, seq_len)
-            energy = energy.masked_fill(mask == 0, -1e10)
-
-            attention = F.softmax(energy, dim=-1)
-            context = torch.bmm(attention, encoder_outputs)  # (batch_size*k, 1, hidden_dim)
-            combined = torch.cat([decoder_output, context], dim=2)
-            logits = self.fc(combined).squeeze(1)  # (batch_size*k, vocab_size)
-            if remove_unk: logits[:, unk_idx] = -1e10  # Block <UNK>
-
-            # scores (log probs)
-            log_probs = F.log_softmax(logits, dim=-1)  # (batch_size*k, vocab_size)
-
-            next_scores = log_probs + beam_scores.view(-1, 1)  # (batch_size*k, vocab_size)
-
-            # reshape to (batch_size, k * vocab_size)
-            next_scores = next_scores.view(batch_size, k * vocab_size)
-
-            # topk candidates for each batch 
-            next_scores, next_tokens = torch.topk(next_scores, k, dim=1)  # log_probs: (batch_size, k), indices: (batch_size, k)
-
-            beam_indices = next_tokens // vocab_size  # what beam is token from
-            token_indices = next_tokens % vocab_size  # what token
-
-            if verbose > 1:
-                print('beam tokens:')
-                display_beams(beam_tokens, beam_scores, token_scores)
-
-            # new scores
-            beam_scores = next_scores
-
-            # new token scores
-            token_scores = torch.cat([
-                token_scores[torch.arange(batch_size).unsqueeze(1), beam_indices],  # (batch_size, k) -> (batch_size, k, seq_len)
-                next_scores.unsqueeze(-1) - current_token_scores.view(batch_size, k, -1)
-            ], dim=-1)
-
-            # new beam tokens
-            beam_tokens = torch.cat([
-                beam_tokens[torch.arange(batch_size).unsqueeze(1), beam_indices],  # (batch_size, k) -> (batch_size, k, seq_len)
-                token_indices.unsqueeze(-1)
-            ], dim=-1)
-
-            # new hidden states
-            hidden = new_hidden.view(num_layers, batch_size, k, -1)  # (num_layers, batch_size, k, hidden_dim)
-            hidden = hidden.view(num_layers, -1, hidden_dim)  # (num_layers, batch_size*k, hidden_dim)
-
-            cell = new_cell.view(num_layers, batch_size, k, -1)  # (num_layers, batch_size, k, hidden_dim)
-            cell = cell.view(num_layers, -1, hidden_dim)
-
-            # early stopping
-            new_finished = (token_indices == eos_idx)
-            finished = finished.gather(1, beam_indices) | new_finished
-            if finished.all():
-                break
-
-        # Select best beam with highest normalized score
-        final_scores = beam_scores / (beam_lengths.float() * alpha)
-        # final_scores = beam_scores
-        best_indices = final_scores.argmax(dim=1)
-        trg_seq = beam_tokens[torch.arange(batch_size), best_indices]
-        trg_seq_scores = token_scores[torch.arange(batch_size), best_indices]
-
-        if verbose>0:
-            for i in range(batch_size):
-                print('result:')
-                display_trg(trg_seq[i])
-                print('token scores:')
-                display_probs(trg_seq_scores[i])
-
-
-        if border > 0.0:
-            trg_seq = trg_seq.masked_fill(trg_seq_scores < np.log(border), pad_idx) # 1d
-
-        return trg_seq
-
-    def demonstrate(self, val_loader, vocab_src, vocab_trg, examples=10, device='cuda', wait=3, verbose=1):
+    def demonstrate(self, val_loader, vocab_src, vocab_trg, examples=10, device='cuda', wait=3, verbose=0):
         from submission import bleu
         
         n = 0
