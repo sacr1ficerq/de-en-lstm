@@ -25,16 +25,15 @@ def penalty(r, c):
         return 1e-10
     return np.exp(1 - (r / c))
 
-
-def get_precisions(ref, c, verbose=False):
+def get_precisions(ref, c, n=4, verbose=False):
     assert isinstance(c, list)
     assert isinstance(ref,list)
-    correct = np.zeros(4)
-    total = np.zeros(4)
+    correct = np.zeros(n)
+    total = np.zeros(n)
     if len(c) == 0:
         return correct, total
 
-    for n in range(1, 5):
+    for n in range(1, n+1):
         c_ngrams = list(zip(*[c[i:] for i in range(n)]))
 
         c_ngram_cnt = Counter(c_ngrams)
@@ -51,10 +50,10 @@ def get_precisions(ref, c, verbose=False):
         
     return correct, total
 
-def bleu_from_precision(correct, total, pen, verbose=False):
-    pres = np.zeros(4)
+def bleu_from_precision(correct, total, pen, n=4, verbose=False):
+    pres = np.zeros(n)
     smooth = 1
-    for n in range(4):
+    for n in range(n):
         precision = 0
         if total[n] == 0:
             precision = 0
@@ -73,16 +72,16 @@ def bleu_from_precision(correct, total, pen, verbose=False):
         print(*np.round(pres*100, 1), sep='/')
     return pen * p * 100
 
-def bleu(ref, c, verbose=False):
+def bleu(ref, c, n=4, verbose=False):
     assert isinstance(ref, list)
     assert isinstance(c, list)
     # correct, total = get_precisions(ref, c, verbose=verbose)
-    correct, total = get_precisions(ref, c, verbose=False)
+    correct, total = get_precisions(ref, c, n=n, verbose=False)
     # print(pres)
 
     pen = penalty(len(ref), len(c))
 
-    return bleu_from_precision(correct, total, pen, verbose=verbose)
+    return bleu_from_precision(correct, total, pen, n=n, verbose=verbose)
 
 def eval_bleu(pred_filename, ref_filename):
     cmd = f"sacrebleu {ref_filename} --tokenize none --width 2 -b -i {pred_filename}"
@@ -96,10 +95,10 @@ def eval_bleu(pred_filename, ref_filename):
     # os.remove(ref_filename)
     return bleu_score
 
-no_unk = set(['<BOS>', '<EOS>', '<PAD>'])
+no_unk = set(['<BOS>', '<EOS>', '<PAD>', '<SUB>', '<NUM>'])
 # no_unk = set(['<BOS>', '<EOS>', '<NUM>', '<PAD>'])
 
-def get_bleu(model, dataloader, vocab_trg, raw_dataset, use_beam=False, beam_width=5, n=None, border=0.0, device='cuda'):
+def get_bleu(model, dataloader, vocab_trg, vocab_src, raw_dataset, use_beam=False, beam_width=5, n=None, border=0.0, device='cuda'):
     penalties = 0
     correct = np.zeros(4)
     total = np.zeros(4)
@@ -111,30 +110,27 @@ def get_bleu(model, dataloader, vocab_trg, raw_dataset, use_beam=False, beam_wid
 
     with torch.no_grad():
         for batch_idx, (src, trg) in enumerate(tqdm(dataloader)):
+            if cnt == 0:
+                break
             if use_beam:
                 predictions = model.inference_beam(src, beam_width=beam_width, border=border, device=device) # batch
             else:
                 predictions = model.inference(src, device=device) # batch
             for i in range(len(src)):
+                if cnt == 0:
+                    break
                 ref = raw_dataset[batch_idx * dataloader.batch_size + i]
                 # print(vocab_trg.decode(trg[i]), ref)
-                pred_text = vocab_trg.decode(predictions[i], ignore=no_unk, src=ref)
+                pred_text = vocab_trg.decode(predictions[i], ignore=no_unk, src=ref, vocab_src=vocab_src)
                 penalties += penalty(len(ref), len(pred_text))
                 c, t = get_precisions(ref, pred_text)
-                b = bleu(ref, pred_text)
-                if b < 7:
-                    pass # TODO: handle bad training data seperatly, or inspect predictions
                 correct += c
                 total += t
-                len_ref += list(trg[i]).index(eos_idx) - 1
+                len_ref += (trg[i] != pad_idx).sum(dim=-1).item()
                 len_pred += len(pred_text)
 
                 # sleep(3)
                 cnt -= 1
-                if cnt == 0:
-                    break
-            if cnt == 0:
-                break
 
     print('correct:\t', *map(int, correct))
     print('total:\t\t', *map(int, total))
@@ -144,7 +140,60 @@ def get_bleu(model, dataloader, vocab_trg, raw_dataset, use_beam=False, beam_wid
     return result
 
 
-def make_submission(model, submission_loader, vocab_trg, filenames, raw_dataset, use_beam=False, beam_width=5, device='cuda'):
+def bad_bleu(model, dataloader, vocab_trg, vocab_src, raw_dataset, use_beam=False, beam_width=5, n=None, border=0.0, device='cuda'):
+    src_bad = '../submission/bad_bleu.de'
+    trg_bad = '../submission/bad_bleu.en'
+    pred_bad = '../submission/bad_bleu_pred.en'
+    pred_beam = '../submission/bad_bleu_beam.en'
+
+
+    print('calculating bleu...')
+    penalties = 0
+    correct = np.zeros(4)
+    total = np.zeros(4)
+    if n == None: n = len(raw_dataset)
+    cnt = n
+
+    len_ref = 0
+    len_pred = 0
+
+    with torch.no_grad():
+        with open (src_bad, 'w', encoding='utf-8') as f_src, open(trg_bad, 'w', encoding='utf-8') as f_trg, open(pred_bad, 'w', encoding='utf-8') as f_pred, open(pred_beam, 'w', encoding='utf-8') as f_beam:
+            for batch_idx, (src, trg) in enumerate(tqdm(dataloader)):
+                predictions_beam = model.inference_beam(src, beam_width=beam_width, border=border, device=device) # batch
+                predictions = model.inference(src, device=device) # batch
+                for i in range(len(src)):
+                    if cnt == 0:
+                        break
+                    ref = raw_dataset[batch_idx * dataloader.batch_size + i]
+                    # print(vocab_trg.decode(trg[i]), ref)
+                    pred_text = vocab_trg.decode(predictions[i], ignore=no_unk, src=ref, vocab_src=vocab_src)
+                    pred_beam = vocab_trg.decode(predictions_beam[i], ignore=no_unk, src=ref, vocab_src=vocab_src)
+                    penalties += penalty(len(ref), len(pred_text))
+                    c, t = get_precisions(ref, pred_text)
+                    b_beam = bleu(ref, pred_beam)
+                    b = bleu(ref, pred_text)
+                    if (b - b_beam) * len(pred_text) > 10 * 10:
+                        f_src.write(" ".join(vocab_src.decode(src[i], ignore=set(['<EOS>', '<BOS>']), src=ref, vocab_src=vocab_trg)) + '\n')
+                        f_trg.write(" ".join(ref) + '\n')
+                        f_pred.write(" ".join(pred_text) + '\n')
+                        f_beam.write(" ".join(pred_beam) + '\n')
+                    correct += c
+                    total += t
+                    len_ref += list(trg[i]).index(eos_idx) - 1
+                    len_pred += len(pred_text)
+
+                    cnt -= 1
+
+    print('correct:\t', *map(int, correct))
+    print('total:\t\t', *map(int, total))
+    bp = penalty(len_ref, len_pred)
+    result = np.round(bleu_from_precision(correct, total, bp, verbose=True), 2)
+
+    return result
+
+
+def make_submission(model, submission_loader, vocab_trg, vocab_src, filenames, raw_dataset, use_beam=False, beam_width=5, device='cuda'):
     with open(filenames['submission_trg'], 'w', encoding='utf-8') as f_pred:
         with torch.no_grad():
             for batch_idx, a in enumerate(tqdm(submission_loader)):
@@ -156,5 +205,5 @@ def make_submission(model, submission_loader, vocab_trg, filenames, raw_dataset,
                 for i in range(len(a)):
                     t = raw_dataset[batch_idx * submission_loader.batch_size + i]
                         # print(t)
-                    pred_text = vocab_trg.decode(predictions[i], ignore=no_unk, src=t)
+                    pred_text = vocab_trg.decode(predictions[i], ignore=no_unk, src=t, vocab_src=vocab_src)
                     f_pred.write(" ".join(pred_text) + '\n')

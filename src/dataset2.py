@@ -11,65 +11,93 @@ from tqdm import tqdm
 
 import re
 
+import sentencepiece as spm
+
 unk_idx, pad_idx, bos_idx, eos_idx, num_idx, sub_idx = 0, 1, 2, 3, 4, 5
 
-def tokenize(line):
-    return line.strip().split()
+
 
 specials = ['<UNK>', '<PAD>', '<BOS>', '<EOS>', '<NUM>', '<SUB>']
 
 
+def tokenize_line(line):
+    # print(line)
+    return line.strip().split()
+
+class BPE():
+    def __init__(self, filename, vocab_size):
+        spm.SentencePieceTrainer.train(
+            input=filename,
+            model_prefix='bpe_model',
+            vocab_size=vocab_size,
+            model_type='bpe',
+        )
+
+        sp = spm.SentencePieceProcessor()
+        sp.load('bpe_model.model')
+        self.tokenize = sp.encode_as_pieces
+        self.detokenize = sp.decode_pieces
+
 class Tokenizer():
-    def __init__(self, filename, tokenize=tokenize):
+    def __init__(self, filename, use_bpe=False):
+        if use_bpe:
+            self.bpe = BPE(filename, 25000)
+            self.tokenize_line = self.bpe.tokenize
+        else:
+            self.tokenize_line = tokenize_line
+    def tokenize(self, filename):
         lines = []
         with open(filename, encoding='utf-8') as f:
             lines = f.readlines()
-        sentences = [tokenize(line) for line in lines]
-        self.sentences = sentences
+        sentences = [self.tokenize_line(line) for line in lines]
+        return sentences
 
-pattern_float = r"^-?\+?\d+\.?\,?\d*\+?-?$"
+pattern_float = r"^ ?-?\+?\d+\.?\,?\d*\+?-?$"
 pattern_has_digit = r"\d"
 
 class Vocab():
-    def __init__(self, filename, min_freq=2, max_freq_sub=8, sub_len=4, specials=specials):
-        sentences = Tokenizer(filename).sentences
+    def __init__(self, filename, min_freq=2, max_freq_sub=8, sub_len=4, specials=specials, use_bpe=False, use_sub=True):
+        self.tokenizer = Tokenizer(filename, use_bpe=use_bpe)
+        sentences = self.tokenizer.tokenize(filename)
         self.sub_len = sub_len
         self.max_freq_sub = max_freq_sub
 
-        self.word_counter = Counter([word for words in sentences for word in words])
+        self.token_counter = Counter([token for tokens in sentences for token in tokens])
         self.vocab = {}
-        def check_float(word):
-            return re.match(pattern_float, word)
+        def check_float(token):
+            return re.match(pattern_float, token)
 
         self.check_float = check_float
 
-        def check_sub(word):
-            if not re.match(pattern_float, word) \
-                and (re.match(pattern_has_digit, word) \
-                or len(word) <= self.sub_len) \
-                and self.word_counter[word] <= self.max_freq_sub: return True
+        def check_sub(token):
+            if not re.match(pattern_float, token) \
+                and (re.match(pattern_has_digit, token) \
+                or len(token) <= self.sub_len) \
+                and self.token_counter[token] <= self.max_freq_sub: return True
             return False
 
-
-        self.check_sub = check_sub
+        if use_sub:
+            self.check_sub = check_sub
+        else:
+            self.check_sub = lambda token: False
 
         self.specials = set(specials)
 
-        vocab_set = set(self.word_counter.keys())
+        vocab_set = set(self.token_counter.keys())
 
-        self.all_words = []
-        for word in vocab_set:
-            if self.check_float(word) \
-            or self.check_sub(word) \
-            or self.word_counter[word] < min_freq: continue
-            self.all_words.append(word)
-        self.all_words = specials + sorted(set(self.all_words) - self.specials)
+        self.all_tokens = []
+        for token in vocab_set:
+            if self.check_float(token) \
+            or self.check_sub(token) \
+            or self.token_counter[token] < min_freq: continue
+            self.all_tokens.append(token)
+        self.all_tokens = specials + sorted(set(self.all_tokens) - self.specials)
 
-        for i, word in enumerate(self.all_words):
-            self.vocab[word] = i
+        for i, token in enumerate(self.all_tokens):
+            self.vocab[token] = i
 
     def plot_vocab(self):
-        cnt = Counter(self.word_counter.values())
+        cnt = Counter(self.token_counter.values())
         xs = sorted(cnt.keys())
         ys = [cnt[k] for k in xs]
         plt.xlabel('frequency')
@@ -77,32 +105,50 @@ class Vocab():
         plt.plot(xs[:100], ys[:100])
         plt.show()
         
-        print((cnt[1]+2* cnt[2])/sum((np.array(list(cnt.values())))*(np.array(list(cnt.keys())))))
+        # print((cnt[1]+2* cnt[2])/sum((np.array(list(cnt.values())))*(np.array(list(cnt.keys())))))
 
-    def encode_word(self, word) -> int:
-        if re.match(pattern_float, word):
+    def encode_token(self, token) -> int:
+        if re.match(pattern_float, token):
             return num_idx
-        if word not in self.vocab:
-            if len(word) < self.sub_len or re.match(pattern_has_digit, word):
+        if token not in self.vocab:
+            if len(token) < self.sub_len or re.match(pattern_has_digit, token):
                 return sub_idx
             return unk_idx
-        return self.vocab[word]
+        return self.vocab[token]
 
     def decode_idx(self, idx) -> str:
-        return self.all_words[idx]
+        return self.all_tokens[idx]
 
-    def encode(self, words, max_len=None):
-        if words[0] != '<BOS>':
-            words.insert(0, '<BOS>')
-        if words[-1] != '<EOS>':
-            words.append('<EOS>')
+    def encode_line(self, line, max_len=None):
+        if len(line) == 0:
+            return ['<BOS>', '<EOS>']
+        tokens = self.tokenizer.tokenize_line(line)
+        if tokens[0] != '<BOS>':
+            tokens.insert(0, '<BOS>')
+        if tokens[-1] != '<EOS>':
+            tokens.append('<EOS>')
         
         if max_len:
-            words = words[:max_len]
-            if words[-1] != '<EOS>':
-                words[-1] = ('<EOS>')
+            tokens = tokens[:max_len]
+            # if tokens[-1] != '<EOS>':
+            #     tokens[-1] = ('<EOS>')
 
-        return [self.encode_word(word) for word in words]
+        return [self.encode_token(token) for token in tokens]
+
+    def encode(self, tokens, max_len=None):
+        if len(tokens) == 0:
+            return ['<BOS>', '<EOS>']
+        if tokens[0] != '<BOS>':
+            tokens.insert(0, '<BOS>')
+        if tokens[-1] != '<EOS>':
+            tokens.append('<EOS>')
+        
+        if max_len:
+            tokens = tokens[:max_len]
+            # if tokens[-1] != '<EOS>':
+            #     tokens[-1] = ('<EOS>')
+
+        return [self.encode_token(token) for token in tokens]
 
     def decode(self, idxs, ignore=set(['<UNK>', '<BOS>', '<EOS>', '<PAD>']), src=None, vocab_src=None):
         result = []
@@ -135,27 +181,25 @@ class Vocab():
                 result[idx] = nums_src[t]
         if has_sub and src != None:
             subs_src = list(filter(vocab_src.check_sub, src))
-            print(sub_idxs)
-            print(subs_src)
             for t, idx in enumerate(sub_idxs):
                 if len(subs_src) <= t:
                     break
                 result[idx] = subs_src[t]
         # if len(result) == 0: return result
-        return list(filter(lambda word: not word in ignore, result))
+        return list(filter(lambda token: not token in ignore, result))
 
     def __len__(self):
-        return len(self.all_words)
+        return len(self.all_tokens)
 
 
 class TranslationDataset(Dataset):
     def __init__(self, vocab_src, vocab_trg, filename_src, filename_trg, max_len=48, device='cuda', sort_lengths=False):
         self.max_len = max_len
-        word_sentences_src = Tokenizer(filename_src).sentences
-        word_sentences_trg = Tokenizer(filename_trg).sentences
+        token_sentences_src = vocab_src.tokenizer.tokenize(filename_src)
+        token_sentences_trg = vocab_trg.tokenizer.tokenize(filename_trg)
 
-        lengths_src = [len(sentence) for sentence in word_sentences_src]
-        lengths_trg = [len(sentence) for sentence in word_sentences_trg]
+        lengths_src = [len(sentence) for sentence in token_sentences_src]
+        lengths_trg = [len(sentence) for sentence in token_sentences_trg]
         
         self.cnt_src = Counter(lengths_src)
         self.cnt_trg = Counter(lengths_trg)
@@ -164,19 +208,19 @@ class TranslationDataset(Dataset):
         sentences_trg = []
 
         if sort_lengths:
-            word_sentences_src, word_sentences_trg = zip(*sorted(zip(word_sentences_src, word_sentences_trg), 
+            token_sentences_src, token_sentences_trg = zip(*sorted(zip(token_sentences_src, token_sentences_trg), 
                                                                  key=lambda x: len(x[0]),
                                                                  reverse=True))
-            word_sentences_src = list(word_sentences_src)
-            word_sentences_trg = list(word_sentences_trg)
+            token_sentences_src = list(token_sentences_src)
+            token_sentences_trg = list(token_sentences_trg)
 
 
-        for i in tqdm(range(len(word_sentences_src))):
-            new_src = vocab_src.encode(word_sentences_src[i], max_len)
+        for i in tqdm(range(len(token_sentences_src))):
+            new_src = vocab_src.encode(token_sentences_src[i], max_len)
             new_src = torch.tensor(new_src, dtype=torch.long).to(device)
             sentences_src.append(new_src)
 
-            new_trg = vocab_trg.encode(word_sentences_trg[i], max_len)
+            new_trg = vocab_trg.encode(token_sentences_trg[i], max_len)
             new_trg = torch.tensor(new_trg, dtype=torch.long).to(device)
             sentences_trg.append(new_trg)
 
@@ -194,9 +238,9 @@ class TranslationDataset(Dataset):
 
 class SubmissionDataset(Dataset):
     def __init__(self, filename, vocab, device='cuda'):
-        word_sentences = Tokenizer(filename).sentences
+        token_sentences = Tokenizer(filename).sentences
 
-        src = [vocab.encode(sentence) for sentence in word_sentences]
+        src = [vocab.encode(sentence) for sentence in token_sentences]
         src = [torch.tensor(sentence, dtype=torch.long).to(device) for sentence in src]
         self.src = src
 
@@ -208,7 +252,7 @@ class SubmissionDataset(Dataset):
 
 class RawDataset(Dataset):
     def __init__(self, filename):
-        self.src = Tokenizer(filename).sentences
+        self.src = Tokenizer(filename).tokenize(filename)
 
     def __len__(self):
         return len(self.src)

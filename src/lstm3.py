@@ -1,114 +1,12 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from time import sleep
-
-from tqdm import tqdm
 
 import numpy as np
 
 unk_idx, pad_idx, bos_idx, eos_idx = 0, 1, 2, 3
-
-from torch.autograd import profiler
-
-
-def profile_epoch(model, optimizer, train_loader, val_loader, criterion, vocab_trg, scheduler, teacher_forcing=1, include_backward=True):
-    model.train()
-    total_train_loss = 0
-
-    with profiler.profile(use_cuda=True, use_kineto=True, profile_memory=True) as prof:
-        for i, (src_seq, trg_seq) in enumerate(tqdm(train_loader)):
-            trg_input = trg_seq[:, :-1]
-            trg_output = trg_seq[:, 1:]
-
-            # with profiler.profile(use_cuda=True) as prof:
-            #     logits = model(src_seq, trg_seq)
-            
-            # print(prof.key_averages().table(sort_by="cuda_time_total"))
-
-            logits = model.forward(src_seq, trg_input, teacher_forcing=teacher_forcing)
-            
-            logits = logits.view(-1, len(vocab_trg))
-            trg_output = trg_output.reshape(-1)
-
-            loss = criterion(logits, trg_output)
-            total_train_loss += loss.item()
-
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-
-            if i > 10:
-                break
-    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
-    return 0, 0
-    model.eval()
-    total_val_loss = 0
-
-    with torch.no_grad():
-        for src_seq, trg_seq in tqdm(val_loader):
-            trg_input = trg_seq[:, :-1]
-            trg_output = trg_seq[:, 1:]
-
-            logits = model(src_seq, trg_input, teacher_forcing=0)
-            logits = logits.view(-1, len(vocab_trg))
-            trg_output = trg_output.reshape(-1)
-
-            loss = criterion(logits, trg_output)
-            total_val_loss += loss.item()
-
-    avg_val_loss = total_val_loss / len(val_loader)
-    avg_train_loss = total_train_loss / len(train_loader)
-
-    if scheduler:
-        scheduler.step(avg_val_loss)
-
-    return
-
-def profile(config, filenames, vocab_src, vocab_trg, train_dataset, val_dataset):
-    device='cuda'
-    unk_idx, pad_idx, bos_idx, eos_idx = 0, 1, 2, 3
-
-    train_loader = TrainDataLoader(train_dataset, batch_size=config.get('batch_size', 128), shuffle=True)
-    val_loader = TestDataLoader(val_dataset, batch_size=256, shuffle=False)
-
-    config['src_vocab_size'] = len(vocab_src)
-    config['trg_vocab_size'] = len(vocab_trg)
-
-    model = LSTM_3(config=config).to(device)
-
-    criterion = nn.CrossEntropyLoss(ignore_index=pad_idx, 
-                                    label_smoothing=config['label_smoothing'])
-
-    optimizer = optim.AdamW(model.parameters(), 
-                            lr=config['learning_rate'], 
-                            weight_decay=config['weight_decay'])
-
-    scheduler = ReduceLROnPlateau(optimizer, 
-                                patience=config['patience'], 
-                                factor=config['gamma'], 
-                                threshold=config['threshold'])
-
-    print(model)
-
-
-    teacher_forcing = 1.0
-    # teacher_forcing = 0.5
-
-    train_loss, val_loss = train_epoch(model, 
-                                        optimizer, 
-                                        train_loader, 
-                                        val_loader, 
-                                        criterion, 
-                                        vocab_trg, 
-                                        scheduler,
-                                        teacher_forcing=teacher_forcing)
-
-    return
 
 class LSTM_3(nn.Module):
     def __init__(self, 
@@ -216,86 +114,34 @@ class LSTM_3(nn.Module):
         state = torch.cat([state[:, 0], state[:, 1]], dim=2)  # (num_layers, batch, 2*hidden_size)
         return torch.stack([self.proj_layer_norm(proj_layers[i](state[i])) for i in range(self.num_layers)], dim=0)
 
-    def forward(self, src_seq, trg_seq, device='cuda', teacher_forcing=1.0):
-        if teacher_forcing == 1.0: return self.forward_no_tf(src_seq, trg_seq)
-        src_embedded = self.emb_dropout(self.src_embedding(src_seq)) # (batch_size, src_len, embedding_dim)
-        src_embedded = self.emb_layer_norm(src_embedded)
-        src_embedded = self.emb_dropout(src_embedded)
-
+    def _encode(self, src_embedded):
         encoder_outputs, (hidden, cell) = self.encoder(src_embedded)  # hidden/cell: (1, batch_size, hidden_size)
         encoder_outputs = self.encoder_output_proj(encoder_outputs)
-        encoder_outputs = self.enc_dropout(encoder_outputs)
-
-        encoder_outputs_t = encoder_outputs.transpose(1, 2)
-        mask = (src_seq != pad_idx).unsqueeze(1)  # (batch_size, 1, src_len)
+        encoder_outputs = self.encoder_output_norm(encoder_outputs)
 
         hidden = self._project_hidden(hidden, self.encoder_hidden_proj)
         cell = self._project_hidden(cell, self.encoder_cell_proj)
 
-        batch_size = src_seq.size(0)
-        trg_len = trg_seq.size(1)
-        trg_vocab_size = self.fc.out_features
+        return encoder_outputs, (hidden, cell)
 
-        # tensor to store decoder outputs
-        logits = torch.zeros(batch_size, trg_len, trg_vocab_size, device=device)
-        decoder_input = trg_seq[:, 0].unsqueeze(1)  # [<sos>] (batch_size, 1)
+    def _decode(self, trg_embedded, hidden, cell):
+        decoder_outputs, (hidden, cell) = self.decoder(trg_embedded, (hidden, cell))  # (batch_size, trg_len, hidden_size)
+        decoder_outputs = self.decoder_output_norm(decoder_outputs)
+        return decoder_outputs, (hidden, cell)
 
-        tf_mask = (torch.rand(batch_size, trg_len - 1, device=device) < teacher_forcing).long()
-
-        # autoregressive decoding with teacher forcing
-        for t in range(1, trg_len):  # skip <sos>
-            trg_embedded = self.trg_embedding(decoder_input)  # (batch_size, 1, emb_dim)
-            # trg_embedded = self.emb_dropout(self.trg_embedding(decoder_input))  # (batch_size, 1, emb_dim)
-            
-            decoder_output, (hidden, cell) = self.decoder(trg_embedded, (hidden, cell))
-
-            # decoder_output = self.dec_dropout(decoder_output)
-
-            energy = torch.bmm(decoder_output, encoder_outputs_t)  # (batch_size, 1, src_len)
-            energy = energy.masked_fill(mask == 0, -1e10)
-            
-            attention = F.softmax(energy, dim=-1)
-            # attention = self.attention_dropout(attention)
-            context = torch.bmm(attention, encoder_outputs)  # (batch_size, 1, hidden_dim)
-
-            combined = torch.cat([decoder_output, context], dim=2)  # (batch_size, 1, hidden_dim * 2)
-            # step_logits = self.fc(combined)  # (batch_size, 1, trg_vocab_size)
-            # logits[:, t] = step_logits.squeeze(1)
-            logits[:, t:t+1] = self.fc(combined)  # (batch_size, trg_vocab_size)
-            # print(logits.size(), logits[:, t].size())
-                
-            next_token_gt = trg_seq[:, t].unsqueeze(1)  # Ground truth (batch_size, 1)
-            # next_token_pred = step_logits.argmax(-1)  # Predicted token (batch_size, 1)
-            next_token_pred = logits[:, t].argmax(-1).unsqueeze(1)  # Predicted token (batch_size, 1)
-            # print(next_token_pred.size())
-            decoder_input = torch.where(
-                tf_mask[:, t - 1].unsqueeze(1).bool(),
-                next_token_gt,
-                next_token_pred,
-            )
-
-
-        return logits  # (batch_size, trg_len, trg_vocab_size)
-
-    def forward_no_tf(self, src_seq, trg_seq, device='cuda'):
+    def forward_no_tf(self, src_seq, trg_seq):
         src_embedded = self.src_embedding(src_seq) # (batch_size, src_len, embedding_dim)
         src_embedded = self.emb_layer_norm(src_embedded)
         src_embedded = self.emb_dropout(src_embedded)
 
-        encoder_outputs, (hidden, cell) = self.encoder(src_embedded)  # hidden/cell: (1, batch_size, hidden_size)
-        encoder_outputs = self.encoder_output_proj(encoder_outputs)
-        encoder_outputs = self.encoder_output_norm(encoder_outputs)
+        encoder_outputs, (hidden, cell) = self._encode(src_embedded)
         encoder_outputs = self.enc_dropout(encoder_outputs)
-
-        hidden = self._project_hidden(hidden, self.encoder_hidden_proj)
-        cell = self._project_hidden(cell, self.encoder_cell_proj)
 
         trg_embedded = self.trg_embedding(trg_seq) # (batch_size, trg_len, embedding_dim)
         trg_embedded = self.emb_layer_norm(trg_embedded)
         trg_embedded = self.emb_dropout(trg_embedded)
 
-        decoder_outputs, _ = self.decoder(trg_embedded, (hidden, cell))  # (batch_size, trg_len, hidden_size)
-        decoder_outputs = self.decoder_output_norm(decoder_outputs)
+        decoder_outputs, _ = self._decode(trg_embedded, hidden, cell)  # (batch_size, trg_len, hidden_size)
         decoder_outputs = self.dec_dropout(decoder_outputs)
 
         # attention
@@ -379,31 +225,90 @@ class LSTM_3(nn.Module):
 
         return trg_seq
 
-    def inference_beam(self, src_seq, max_len=None, beam_width=5, remove_unk=True, lens=None, 
+    def forward(self, src_seq, trg_seq, device='cuda', teacher_forcing=1.0):
+        if teacher_forcing == 1.0: return self.forward_no_tf(src_seq, trg_seq)
+        src_embedded = self.emb_dropout(self.src_embedding(src_seq)) # (batch_size, src_len, embedding_dim)
+        src_embedded = self.emb_layer_norm(src_embedded)
+        src_embedded = self.emb_dropout(src_embedded)
+
+        encoder_outputs, (hidden, cell) = self.encoder(src_embedded)  # hidden/cell: (1, batch_size, hidden_size)
+        encoder_outputs = self.encoder_output_proj(encoder_outputs)
+        encoder_outputs = self.enc_dropout(encoder_outputs)
+
+        encoder_outputs_t = encoder_outputs.transpose(1, 2)
+        mask = (src_seq != pad_idx).unsqueeze(1)  # (batch_size, 1, src_len)
+
+        hidden = self._project_hidden(hidden, self.encoder_hidden_proj)
+        cell = self._project_hidden(cell, self.encoder_cell_proj)
+
+        batch_size = src_seq.size(0)
+        trg_len = trg_seq.size(1)
+        trg_vocab_size = self.fc.out_features
+
+        # tensor to store decoder outputs
+        logits = torch.zeros(batch_size, trg_len, trg_vocab_size, device=device)
+        decoder_input = trg_seq[:, 0].unsqueeze(1)  # [<sos>] (batch_size, 1)
+
+        tf_mask = (torch.rand(batch_size, trg_len - 1, device=device) < teacher_forcing).long()
+
+        # autoregressive decoding with teacher forcing
+        for t in range(1, trg_len):  # skip <sos>
+            trg_embedded = self.trg_embedding(decoder_input)  # (batch_size, 1, emb_dim)
+            # trg_embedded = self.emb_dropout(self.trg_embedding(decoder_input))  # (batch_size, 1, emb_dim)
+            
+            decoder_output, (hidden, cell) = self.decoder(trg_embedded, (hidden, cell))
+
+            # decoder_output = self.dec_dropout(decoder_output)
+
+            energy = torch.bmm(decoder_output, encoder_outputs_t)  # (batch_size, 1, src_len)
+            energy = energy.masked_fill(mask == 0, -1e10)
+            
+            attention = F.softmax(energy, dim=-1)
+            # attention = self.attention_dropout(attention)
+            context = torch.bmm(attention, encoder_outputs)  # (batch_size, 1, hidden_dim)
+
+            combined = torch.cat([decoder_output, context], dim=2)  # (batch_size, 1, hidden_dim * 2)
+            # step_logits = self.fc(combined)  # (batch_size, 1, trg_vocab_size)
+            # logits[:, t] = step_logits.squeeze(1)
+            logits[:, t:t+1] = self.fc(combined)  # (batch_size, trg_vocab_size)
+            # print(logits.size(), logits[:, t].size())
+                
+            next_token_gt = trg_seq[:, t].unsqueeze(1)  # Ground truth (batch_size, 1)
+            # next_token_pred = step_logits.argmax(-1)  # Predicted token (batch_size, 1)
+            next_token_pred = logits[:, t].argmax(-1).unsqueeze(1)  # Predicted token (batch_size, 1)
+            # print(next_token_pred.size())
+            decoder_input = torch.where(
+                tf_mask[:, t - 1].unsqueeze(1).bool(),
+                next_token_gt,
+                next_token_pred,
+            )
+
+        return logits  # (batch_size, trg_len, trg_vocab_size)
+
+    def inference_beam(self, src_seq, max_len=None, beam_width=5, remove_unk=True, 
                        device='cuda', verbose=0, vocab_trg=None, vocab_src=None, border=0.0):
         unk_idx, pad_idx, bos_idx, eos_idx, num_idx = 0, 1, 2, 3, 4
         
-        if max_len == None:
-            max_len = int(src_seq.size(1) * 1.5 + 1)
 
         self.eval()
         batch_size = src_seq.size(0)
         k = beam_width
-        alpha = 0.5  # penalty
 
-        if verbose > 1: print(f'k: {k}\tB: {batch_size}\tmax_len: {max_len}')
+
+        src_lens = (src_seq != pad_idx).sum(dim=1).repeat(k).view(batch_size, k) * 1.2 + 2
+        if max_len == None:
+            max_len = int((src_seq != pad_idx).sum(dim=1).max(dim=-1)[0].item() * 1.2 + 2)
+            # max_len = 72
+
+        if verbose >= 1: print(f'k: {k}\tB: {batch_size}\tmax_len: {max_len}')
 
         # encoder forward
         with torch.no_grad():
             src_embedded = self.src_embedding(src_seq)  # (batch_size, seq_len, emb_dim)
-            encoder_outputs, (hidden, cell) = self.encoder(src_embedded)
-            encoder_outputs = self.encoder_output_proj(encoder_outputs)  # (batch_size, seq_len, hidden_dim)
+            encoder_outputs, (hidden, cell) = self._encode(src_embedded)
             encoder_outputs = encoder_outputs.contiguous()
 
-            hidden = self._project_hidden(hidden, self.encoder_hidden_proj)  # (num_layers, batch_size, hidden_dim)
-            cell = self._project_hidden(cell, self.encoder_cell_proj)
-
-        # expand encoder output for beams
+            # expand encoder output for beams
             encoder_outputs = encoder_outputs.unsqueeze(1).repeat(1, k, 1, 1)  # (batch_size, k, seq_len, hidden_dim)
             encoder_outputs = encoder_outputs.view(batch_size * k, -1, encoder_outputs.size(-1))  # (batch_size*k, seq_len, hidden_dim)
 
@@ -418,7 +323,6 @@ class LSTM_3(nn.Module):
             beam_tokens = torch.full((batch_size, k, 1), bos_idx, dtype=torch.long, device=device)  # (batch_size, k, 1)
             token_scores = torch.full((batch_size, k, 1), 0, dtype=torch.long, device=device)  # (batch_size, k, 1)
 
-            beam_lengths = torch.ones((batch_size, k), dtype=torch.long, device=device)
             finished = torch.zeros((batch_size, k), dtype=torch.bool, device=device)
 
             num_layers = hidden.size(0)
@@ -433,7 +337,7 @@ class LSTM_3(nn.Module):
                 flat_token_scores = token_scores.view(batch_size * k, -1)  # (batch_size*k, seq_len)  
 
                 def pretty_print(row, width=5):
-                    print(" | ".join(f"{str(item):<{width}}" for item in row))
+                    print("|".join(f"{str(item)[:6]:<{width}}" for item in row))
 
                 def display_src(line):
                     pretty_print(map(vocab_src.decode_idx, line))      
@@ -449,11 +353,11 @@ class LSTM_3(nn.Module):
                     ps = np.round(np.exp(log_probs)*100, 2)
                     pretty_print(ps)
 
-                def display_beams(beams, scores, log_probs):
+                def display_beams(beams, scores, log_probs, const=100):
                     for i in range(batch_size):
                         display_src(src_seq[i])
                         print(f'index in batch: {i}')
-                        probs = np.exp(get_array(scores[i]))
+                        probs = np.exp(get_array(scores[i])) * const
                         pretty_print(probs)
                         print()
                         for j, line in enumerate(get_array(beams[i])):
@@ -466,7 +370,8 @@ class LSTM_3(nn.Module):
                 # decoder
                 current_trg = flat_tokens[:, -1].unsqueeze(1)  # (batch_size*k, 1)
                 trg_embedded = self.trg_embedding(current_trg)  # (batch_size*k, 1, emb_dim)
-                decoder_output, (new_hidden, new_cell) = self.decoder(trg_embedded, (flat_hidden, flat_cell))
+                # decoder_output, (new_hidden, new_cell) = self.decoder(trg_embedded, (flat_hidden, flat_cell))
+                decoder_output, (new_hidden, new_cell) = self._decode(trg_embedded, flat_hidden, flat_cell)
 
                 current_token_scores = flat_token_scores[:, -1].unsqueeze(1) # (batch_size*k, 1)
 
@@ -486,6 +391,24 @@ class LSTM_3(nn.Module):
 
                 # scores (log probs)
                 log_probs = F.log_softmax(logits, dim=-1)  # (batch_size*k, vocab_size)
+
+                # print(finished.view(-1))
+                log_probs[finished.view(-1)] = - 1e+10
+                
+                log_probs[finished.view(-1), pad_idx] = 0
+
+                for i in range(batch_size * k):
+                    # print(flat_tokens[i].cpu().numpy())
+                    log_probs[i][flat_tokens[i]] -= np.log(2.5)
+                    
+                    
+                l = src_lens.view(-1) - step + 2
+
+                # print(log_probs[:, eos_idx].size())
+
+                l = l.masked_fill((l > 0), 0)
+                # print(l)
+                log_probs[:, eos_idx] += l * np.log(1.2)
 
                 next_scores = log_probs + beam_scores.view(-1, 1)  # (batch_size*k, vocab_size)
 
@@ -530,18 +453,26 @@ class LSTM_3(nn.Module):
                 if finished.all():
                     break
 
+            beam_lengths = (beam_tokens[torch.arange(batch_size)] != pad_idx).sum(dim=-1)
+            penalty = (src_lens - beam_lengths) / beam_lengths
+            # print(penalty)
+
             # Select best beam with highest normalized score
-            final_scores = beam_scores / (beam_lengths.float() * alpha)
-            # final_scores = beam_scores
+            # print(beam_lengths)
+            final_scores = beam_scores - penalty
             best_indices = final_scores.argmax(dim=1)
             trg_seq = beam_tokens[torch.arange(batch_size), best_indices]
             trg_seq_scores = token_scores[torch.arange(batch_size), best_indices]
+
+            if verbose > 0:
+                print('beam tokens:')
+                display_beams(beam_tokens, beam_scores, token_scores)
 
             if verbose>0:
                 for i in range(batch_size):
                     print('result:')
                     display_trg(trg_seq[i])
-                    print('token scores:')
+                    # print('token scores:')
                     display_probs(trg_seq_scores[i])
 
 
@@ -550,34 +481,53 @@ class LSTM_3(nn.Module):
 
             return trg_seq
 
-    def demonstrate(self, val_loader, vocab_src, vocab_trg, examples=10, device='cuda', wait=3, verbose=0):
-        from submission import bleu
-        
+    def translate(self, src, vocab_src, vocab_trg, beams=0, verbose=0, border=0, device='cuda'):
+        src = src.split()
+        encoded = vocab_src.encode(src)
+        encoded = torch.tensor(encoded, dtype=torch.long, device=device)
+        batched = encoded.unsqueeze(0)
+        if beams == 0:
+            prediction = self.inference(batched, device=device).squeeze(0)
+        else:
+            prediction = self.inference_beam(batched, beam_width=beams, verbose=verbose, vocab_src=vocab_src, vocab_trg=vocab_trg, border=border, device=device).squeeze(0)
+        # print('prediction:', prediction)
+        trg = vocab_trg.decode(prediction, src=src, vocab_src=vocab_src)
+        return " ".join(trg)      
+
+    def demonstrate(self, val_loader, vocab_src, vocab_trg, examples=10, device='cuda', wait=3, verbose=0, beam_width=5):
+        from submission import bleu  
         n = 0
         for batch_idx, (src, trg) in enumerate(val_loader):
-            predictions = self.inference(src, device=device) # batch
-            predictions_beam = self.inference_beam(src, remove_unk=False, 
-                                                   device=device, vocab_src=vocab_src, vocab_trg=vocab_trg, verbose=verbose) # batch
-            for i in range(len(src)):
-                # print(list(src[i]).index(eos_idx), list(trg[i]).index(eos_idx), list(predictions[i]).index(eos_idx), list(predictions_beam[i]).index(eos_idx))
-                
-                s =  vocab_src.decode(src[i])
-                r = vocab_trg.decode(trg[i])
-                c1 = vocab_trg.decode(predictions[i])
-                c2 = vocab_trg.decode(predictions_beam[i])
+            for i in range(examples):
+                if i > val_loader.batch_size: return
+                s = " ".join(vocab_src.decode(src[i]))
+                r = " ".join(vocab_trg.decode(trg[i]))
+                c1 = self.translate(s, 
+                                    device=device,
+                                    vocab_src=vocab_src, 
+                                    vocab_trg=vocab_trg)
+                c2 = self.translate(s, 
+                                    device=device, 
+                                    vocab_src=vocab_src, 
+                                    vocab_trg=vocab_trg, 
+                                    verbose=verbose, 
+                                    beams=beam_width)
+                    # print(list(src[i]).index(eos_idx), list(trg[i]).index(eos_idx), list(predictions[i]).index(eos_idx), list(predictions_beam[i]).index(eos_idx))
 
-                print("src:\t\t", " ".join(s))
-                print("trg:\t\t", " ".join(r))
-                print("pred:\t\t", " ".join(c1))
-                print("pred-beam:\t", " ".join(c2))
+                b = bleu(ref=r.split(), c=c1.split(), verbose=0)
+                b_beam = bleu(ref=r.split(), c=c2.split(), verbose=0)
+                if b < b_beam + 10:
+                    pass
+                    # continue
+                print("src:\t\t", s)
+                print("trg:\t\t", r)
+                print("pred:\t\t", c1)
+                print("pred-beam:\t", c2)
 
-                print(f'bleu:\t\t{bleu(ref=r, c=c1, verbose=0):0.2f}')
-                print(f'bleu beam:\t{bleu(ref=r, c=c2, verbose=0):0.2f}')
+                print(f'bleu:\t\t{b:0.2f}')
+                print(f'bleu beam:\t{b_beam:0.2f}')
                 print()
                 torch.cuda.ipc_collect()
-                n += 1
-                if n == examples:
-                    return
                 sleep(wait)
 
     def save(self, filename, folder):

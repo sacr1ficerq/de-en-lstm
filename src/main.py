@@ -13,8 +13,8 @@ device = 'cuda'
 config = {
     'model_name': 'LSTM_3',
     'feature': 'max-regularization',
-    'max_len': 42,
-    'min_freq_src': 5,
+    'max_len': 48,
+    'min_freq_src': 1,
     'min_freq_trg': 5,
 
     'embedding_dim': 192,
@@ -25,19 +25,19 @@ config = {
     'weight_decay': 1e-3,
     'label_smoothing': 0.3,
 
-    'dropout_emb': 0.12,
+    'dropout_emb': 0.1,
 
-    'dropout_enc': 0.25,
-    'dropout_dec': 0.25,
+    'dropout_enc': 0.2,
+    'dropout_dec': 0.2,
 
     'dropout_attention': 0.1,
 
     'learning_rate': 1e-3,
     'lr_manual_decrease': False,
     'amsgrad': False,
-    'gamma': 0.2,
+    'gamma': 0.5,
     'patience': 1,
-    'threshold': 8e-4,
+    'threshold': 1e-3,
     'batch_size': 128,
 
     'use_tf': False,
@@ -46,10 +46,10 @@ config = {
     'tf_decrease': 0.02
 }
 
-vocab_src = Vocab(filenames['train_src'], min_freq=config['min_freq_src'])
-vocab_trg = Vocab(filenames['train_trg'], min_freq=config['min_freq_trg'])
+vocab_src = Vocab(filenames['train_src'], min_freq=config['min_freq_src'], use_bpe=True, use_sub=False)
+vocab_trg = Vocab(filenames['train_trg'], min_freq=config['min_freq_trg'], use_sub=False)
 
-# config['weights'] = '../weights/saves/lstm-save-5.pt'
+# config['weights'] = '../weights/saves/lstm-save-6.pt'
 
 train_dataset = TranslationDataset(vocab_src, 
                                 vocab_trg, 
@@ -62,7 +62,7 @@ val_dataset = TranslationDataset(vocab_src,
                                 vocab_trg, 
                                 filenames['test_src'], 
                                 filenames['test_trg'], 
-                                max_len=72, 
+                                max_len=100, 
                                 device=device, 
                                 sort_lengths=False)
 
@@ -88,7 +88,7 @@ if __name__ == "__main__":
     train_losses, val_losses = train(config=config, 
                                      filenames=filenames, 
                                      folders=folders, 
-                                     use_wandb=False, 
+                                     use_wandb=True, 
                                      device=device, 
                                      vocab_src=vocab_src,
                                      vocab_trg=vocab_trg,
