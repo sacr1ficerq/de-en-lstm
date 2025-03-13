@@ -12,10 +12,11 @@ device = 'cuda'
 
 config = {
     'model_name': 'LSTM_3',
-    'feature': 'clean-data',
-    'max_len': 72,
-    'min_freq_src': 1,
-    'min_freq_trg': 4,
+    'feature': 'clean-data extended-length origins',
+    'max_len': 48,
+    'min_freq_src': 5,
+    'min_freq_trg': 5,
+    'max_freq_sub': 8,
 
     'bpe_vocab_size': 25000,
 
@@ -24,10 +25,10 @@ config = {
     'num_layers': 3,
 
     'num_epochs': 18,
-    'weight_decay': 1e-3,
-    'label_smoothing': 0.3,
+    'weight_decay': 1e-4,
+    'label_smoothing': 0.2,
 
-    'dropout_emb': 0.1,
+    'dropout_emb': 0.15,
 
     'dropout_enc': 0.2,
     'dropout_dec': 0.2,
@@ -48,10 +49,10 @@ config = {
     'tf_decrease': 0.02
 }
 
-vocab_src = Vocab(filenames['train_src'], min_freq=config['min_freq_src'], use_bpe=True, use_sub=False, vocab_size=config.get('bpe_vocab_size', 25000))
-vocab_trg = Vocab(filenames['train_trg'], min_freq=config['min_freq_trg'], use_sub=False)
+vocab_src = Vocab(filenames['train_src'], min_freq=config['min_freq_src'], use_sub=True, use_bpe=False, vocab_size=config.get('bpe_vocab_size', 25000))
+vocab_trg = Vocab(filenames['train_trg'], min_freq=config['min_freq_trg'], use_sub=True)
 
-# config['weights'] = '../weights/saves/lstm-save-10.pt'
+# config['weights'] = '../weights/saves/lstm-save-8.pt'
 
 train_dataset = TranslationDataset(vocab_src, 
                                 vocab_trg, 

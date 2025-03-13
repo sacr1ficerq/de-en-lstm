@@ -101,7 +101,7 @@ def eval_bleu(pred_filename, ref_filename):
 no_unk = set(['<BOS>', '<EOS>', '<PAD>', '<SUB>', '<NUM>'])
 # no_unk = set(['<BOS>', '<EOS>', '<NUM>', '<PAD>'])
 
-def get_bleu(model, dataset, raw_dataset, vocab_trg, vocab_src, use_beam=False, beam_width=5, n=int(5e2), border=0.0, batch_size=128, device='cuda'):
+def get_bleu(model, dataset, raw_dataset, vocab_trg, vocab_src, use_beam=False, beam_width=5, n=int(1e3), border=0.0, batch_size=128, device='cuda'):
     trainset = torch.utils.data.Subset(dataset, range(min(n, len(dataset))))
     valset = torch.utils.data.Subset(raw_dataset, range(min(n, len(dataset))))
     penalties = 0
@@ -112,6 +112,10 @@ def get_bleu(model, dataset, raw_dataset, vocab_trg, vocab_src, use_beam=False, 
 
     len_ref = 0
     len_pred = 0
+
+    f_pred = open('../submission/pred.txt', 'w', encoding='utf-8')
+    f_ref = open('../submission/ref.txt', 'w', encoding='utf-8')
+
 
     with torch.no_grad():
         for batch_idx, (src, trg) in enumerate(tqdm(bucket_iterator(trainset, batch_size=batch_size, shuffle=False))):
@@ -127,6 +131,7 @@ def get_bleu(model, dataset, raw_dataset, vocab_trg, vocab_src, use_beam=False, 
                 # print(batch_idx * batch_size + i)
                 ref = valset[batch_idx * batch_size + i]
                 # print(vocab_trg.decode(trg[i]), ref)
+
                 pred_text = vocab_trg.decode(predictions[i], ignore=no_unk, src=ref, vocab_src=vocab_src)
                 penalties += penalty(len(ref), len(pred_text))
                 c, t = get_precisions(ref, pred_text)
@@ -135,9 +140,16 @@ def get_bleu(model, dataset, raw_dataset, vocab_trg, vocab_src, use_beam=False, 
                 len_ref += (trg[i] != pad_idx).sum(dim=-1).item()
                 len_pred += len(pred_text)
 
+                def pretty_print(row, width=8):
+                    return "|".join(f"{str(item)[:width+1]:<{width}}" for item in row)
+                if geomean(c/t) < 0.3:
+                    f_pred.write(pretty_print(pred_text) + '\n')
+                    f_ref.write(pretty_print(ref) + '\n')
                 # sleep(3)
                 cnt -= 1
 
+    f_pred.close()
+    f_ref.close()
     print('correct:\t', *map(int, correct))
     print('total:\t\t', *map(int, total))
     bp = penalty(len_ref, len_pred)

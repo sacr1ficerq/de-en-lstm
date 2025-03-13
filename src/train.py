@@ -2,7 +2,7 @@
 from lstm3 import LSTM_3
 
 from submission import get_bleu
-from dataset2 import TranslationDataset, Vocab, bucket_iterator, RawDataset
+from dataset2 import TranslationDataset, Vocab, bucket_iterator, RawDataset, TrainDataLoader
 
 from tqdm import tqdm
 
@@ -88,7 +88,7 @@ def train(config, filenames, folders, device='cuda', use_wandb=False, vocab_src=
                                     filenames['train_trg'], 
                                     max_len=config['max_len'], 
                                     device=device,
-                                    sort_lengths=True)
+                                    sort_lengths=False)
 
     if val_dataset==None: val_dataset = TranslationDataset(vocab_src, 
                                     vocab_trg, 
@@ -105,6 +105,8 @@ def train(config, filenames, folders, device='cuda', use_wandb=False, vocab_src=
     config['trg_vocab_size'] = len(vocab_trg)
 
     model = LSTM_3(config=config).to(device)
+
+    train_loader = TrainDataLoader(train_dataset, 256, True)
 
     criterion = nn.CrossEntropyLoss(ignore_index=pad_idx, 
                                     label_smoothing=config['label_smoothing'])
@@ -194,15 +196,15 @@ def train(config, filenames, folders, device='cuda', use_wandb=False, vocab_src=
                                 #  "Train Sinergy": train_sinergy,
                                 #  "Train BP": train_bp,
 
-                                 "Val BLEU4": val_bleu,
-                                 "Val Sinergy": val_sinergy,
-                                 "Val BP": val_bp})
+                                 "BLEU4": val_bleu,
+                                 "Sinergy": val_sinergy,
+                                 "BP": val_bp})
 
         if demonstrate: model.demonstrate(train_dataset, vocab_src, vocab_trg, examples=3, device=device, wait=0)
 
         print(f"Epoch [{epoch}/{config['num_epochs']}]\tTrain Loss: {train_loss:.4f}\tVal Loss: {val_loss:.4f}")
         # print(f"Train BLUE4: {train_bleu}\tTrain Sinergy: {train_sinergy}\tTrain BP: {train_bp}")
-        print(f"Val BLUE4: {val_bleu}\tVal Sinergy: {val_sinergy}\tVal BP: {val_bp}")
+        print(f"BLUE4: {val_bleu}\tSinergy: {val_sinergy}\tBP: {val_bp}")
 
     model.train_loss = np.array(train_losses)
     model.val_loss = np.array(val_losses)
