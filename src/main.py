@@ -12,16 +12,18 @@ device = 'cuda'
 
 config = {
     'model_name': 'LSTM_3',
-    'feature': 'max-regularization',
-    'max_len': 48,
+    'feature': 'clean-data',
+    'max_len': 72,
     'min_freq_src': 1,
-    'min_freq_trg': 5,
+    'min_freq_trg': 4,
+
+    'bpe_vocab_size': 25000,
 
     'embedding_dim': 192,
     'hidden_size': 384,
     'num_layers': 3,
 
-    'num_epochs': 15,
+    'num_epochs': 18,
     'weight_decay': 1e-3,
     'label_smoothing': 0.3,
 
@@ -46,17 +48,18 @@ config = {
     'tf_decrease': 0.02
 }
 
-vocab_src = Vocab(filenames['train_src'], min_freq=config['min_freq_src'], use_bpe=True, use_sub=False)
+vocab_src = Vocab(filenames['train_src'], min_freq=config['min_freq_src'], use_bpe=True, use_sub=False, vocab_size=config.get('bpe_vocab_size', 25000))
 vocab_trg = Vocab(filenames['train_trg'], min_freq=config['min_freq_trg'], use_sub=False)
 
-# config['weights'] = '../weights/saves/lstm-save-6.pt'
+# config['weights'] = '../weights/saves/lstm-save-10.pt'
 
 train_dataset = TranslationDataset(vocab_src, 
                                 vocab_trg, 
                                 filenames['train_src'], 
                                 filenames['train_trg'], 
                                 max_len=config['max_len'], 
-                                device=device)
+                                device=device,
+                                sort_lengths=True)
 
 val_dataset = TranslationDataset(vocab_src, 
                                 vocab_trg, 
@@ -64,7 +67,7 @@ val_dataset = TranslationDataset(vocab_src,
                                 filenames['test_trg'], 
                                 max_len=100, 
                                 device=device, 
-                                sort_lengths=False)
+                                sort_lengths=True)
 
 config['src_vocab_size'] = len(vocab_src)
 config['trg_vocab_size'] = len(vocab_trg)

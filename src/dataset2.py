@@ -10,6 +10,7 @@ import numpy as np
 from tqdm import tqdm
 
 import re
+import random
 
 import sentencepiece as spm
 
@@ -31,6 +32,13 @@ class BPE():
             model_prefix='bpe_model',
             vocab_size=vocab_size,
             model_type='bpe',
+            unk_id=unk_idx,
+            pad_id=pad_idx,
+            bos_id=bos_idx,
+            eos_id=eos_idx,
+            split_by_whitespace=False,
+            # max_sentence_length=0,
+            split_digits=False
         )
 
         sp = spm.SentencePieceProcessor()
@@ -39,9 +47,9 @@ class BPE():
         self.detokenize = sp.decode_pieces
 
 class Tokenizer():
-    def __init__(self, filename, use_bpe=False):
+    def __init__(self, filename, use_bpe=False, vocab_size=25000):
         if use_bpe:
-            self.bpe = BPE(filename, 25000)
+            self.bpe = BPE(filename, vocab_size)
             self.tokenize_line = self.bpe.tokenize
         else:
             self.tokenize_line = tokenize_line
@@ -49,15 +57,15 @@ class Tokenizer():
         lines = []
         with open(filename, encoding='utf-8') as f:
             lines = f.readlines()
-        sentences = [self.tokenize_line(line) for line in lines]
+        sentences = [self.tokenize_line(' ' + line) for line in lines]
         return sentences
 
 pattern_float = r"^ ?-?\+?\d+\.?\,?\d*\+?-?$"
 pattern_has_digit = r"\d"
 
 class Vocab():
-    def __init__(self, filename, min_freq=2, max_freq_sub=8, sub_len=4, specials=specials, use_bpe=False, use_sub=True):
-        self.tokenizer = Tokenizer(filename, use_bpe=use_bpe)
+    def __init__(self, filename, min_freq=2, max_freq_sub=8, sub_len=4, specials=specials, use_bpe=False, use_sub=False, vocab_size=25000):
+        self.tokenizer = Tokenizer(filename, use_bpe=use_bpe, vocab_size=vocab_size)
         sentences = self.tokenizer.tokenize(filename)
         self.sub_len = sub_len
         self.max_freq_sub = max_freq_sub
@@ -108,10 +116,10 @@ class Vocab():
         # print((cnt[1]+2* cnt[2])/sum((np.array(list(cnt.values())))*(np.array(list(cnt.keys())))))
 
     def encode_token(self, token) -> int:
-        if re.match(pattern_float, token):
+        if self.check_float(token):
             return num_idx
         if token not in self.vocab:
-            if len(token) < self.sub_len or re.match(pattern_has_digit, token):
+            if self.check_sub(token):
                 return sub_idx
             return unk_idx
         return self.vocab[token]
@@ -193,7 +201,7 @@ class Vocab():
 
 
 class TranslationDataset(Dataset):
-    def __init__(self, vocab_src, vocab_trg, filename_src, filename_trg, max_len=48, device='cuda', sort_lengths=False):
+    def __init__(self, vocab_src, vocab_trg, filename_src, filename_trg, max_len=100, device='cuda', sort_lengths=False):
         self.max_len = max_len
         token_sentences_src = vocab_src.tokenizer.tokenize(filename_src)
         token_sentences_trg = vocab_trg.tokenizer.tokenize(filename_trg)
@@ -207,12 +215,13 @@ class TranslationDataset(Dataset):
         sentences_src = []
         sentences_trg = []
 
+        self.ids = []
+
         if sort_lengths:
-            token_sentences_src, token_sentences_trg = zip(*sorted(zip(token_sentences_src, token_sentences_trg), 
-                                                                 key=lambda x: len(x[0]),
-                                                                 reverse=True))
-            token_sentences_src = list(token_sentences_src)
-            token_sentences_trg = list(token_sentences_trg)
+            n = len(token_sentences_src)
+            self.ids = sorted(range(n), key=lambda i: len(token_sentences_src[i]), reverse=True) # descending by src length
+            token_sentences_src = [token_sentences_src[i] for i in self.ids]
+            token_sentences_trg = [token_sentences_trg[i] for i in self.ids]
 
 
         for i in tqdm(range(len(token_sentences_src))):
@@ -251,15 +260,15 @@ class SubmissionDataset(Dataset):
         return self.src[idx]
 
 class RawDataset(Dataset):
-    def __init__(self, filename):
-        self.src = Tokenizer(filename).tokenize(filename)
+    def __init__(self, filename, n=int(1e3)):
+        print(n)
+        self.src = Tokenizer(filename).tokenize(filename)[:n+1]
 
     def __len__(self):
         return len(self.src)
 
     def __getitem__(self, idx):
         return self.src[idx]
-
 
 
 def collate_fn_submission(batch):
@@ -313,3 +322,24 @@ class TestDataLoader(DataLoader):
             if i == idx:
                 return batch
         return None
+
+def collate_bucket(batch):
+    batch.sort(key=lambda x: len(x[0]), reverse=True) # descending lengths
+    src_batch, trg_batch = zip(*batch)
+
+    src_padded = pad_sequence(src_batch, batch_first=True, padding_value=pad_idx)
+    trg_padded = pad_sequence(trg_batch, batch_first=True, padding_value=pad_idx)
+    return src_padded, trg_padded
+
+def bucket_iterator(dataset, batch_size=128, shuffle=True):
+    n = len(dataset)
+    sorted_id = sorted(range(n), key=lambda i: len(dataset[i][0]), reverse=True) # descending by src length
+    sorted_dataset = [dataset[i] for i in sorted_id]
+    
+    buckets = [sorted_dataset[i:i+batch_size] for i in range(0, n, batch_size)]
+
+    if shuffle:
+        random.shuffle(buckets)
+    
+    for bucket in buckets:
+        yield collate_bucket(bucket)

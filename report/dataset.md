@@ -48,3 +48,5 @@
 | $\leq$ 32 | 7.06%                          |
 
 Я думаю оптимально брать около 48.
+![alt text](image.png)
+53m bucket vs 86m base

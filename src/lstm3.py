@@ -8,6 +8,8 @@ import numpy as np
 
 unk_idx, pad_idx, bos_idx, eos_idx = 0, 1, 2, 3
 
+from dataset2 import bucket_iterator
+
 class LSTM_3(nn.Module):
     def __init__(self, 
                  src_vocab_size=None, 
@@ -494,41 +496,43 @@ class LSTM_3(nn.Module):
         trg = vocab_trg.decode(prediction, src=src, vocab_src=vocab_src)
         return " ".join(trg)      
 
-    def demonstrate(self, val_loader, vocab_src, vocab_trg, examples=10, device='cuda', wait=3, verbose=0, beam_width=5):
+    def demonstrate(self, dataset, vocab_src, vocab_trg, examples=10, device='cuda', wait=3, verbose=0, beam_width=5):
         from submission import bleu  
         n = 0
-        for batch_idx, (src, trg) in enumerate(val_loader):
-            for i in range(examples):
-                if i > val_loader.batch_size: return
-                s = " ".join(vocab_src.decode(src[i]))
-                r = " ".join(vocab_trg.decode(trg[i]))
-                c1 = self.translate(s, 
-                                    device=device,
-                                    vocab_src=vocab_src, 
-                                    vocab_trg=vocab_trg)
-                c2 = self.translate(s, 
-                                    device=device, 
-                                    vocab_src=vocab_src, 
-                                    vocab_trg=vocab_trg, 
-                                    verbose=verbose, 
-                                    beams=beam_width)
-                    # print(list(src[i]).index(eos_idx), list(trg[i]).index(eos_idx), list(predictions[i]).index(eos_idx), list(predictions_beam[i]).index(eos_idx))
+        for i, (src, trg) in enumerate(bucket_iterator(dataset, batch_size=1)):
+            if i >= examples:
+                break
+            src = src[0]
+            trg = trg[0]
+            s = " ".join(vocab_src.decode(src))
+            r = " ".join(vocab_trg.decode(trg))
+            c1 = self.translate(s, 
+                                device=device,
+                                vocab_src=vocab_src, 
+                                vocab_trg=vocab_trg)
+            c2 = self.translate(s, 
+                                device=device, 
+                                vocab_src=vocab_src, 
+                                vocab_trg=vocab_trg, 
+                                verbose=verbose, 
+                                beams=beam_width)
+                # print(list(src[i]).index(eos_idx), list(trg[i]).index(eos_idx), list(predictions[i]).index(eos_idx), list(predictions_beam[i]).index(eos_idx))
 
-                b = bleu(ref=r.split(), c=c1.split(), verbose=0)
-                b_beam = bleu(ref=r.split(), c=c2.split(), verbose=0)
-                if b < b_beam + 10:
-                    pass
-                    # continue
-                print("src:\t\t", s)
-                print("trg:\t\t", r)
-                print("pred:\t\t", c1)
-                print("pred-beam:\t", c2)
+            b, pres, bp = bleu(ref=r.split(), c=c1.split(), verbose=0)
+            b_beam, pres_beam, bp_beam = bleu(ref=r.split(), c=c2.split(), verbose=0)
+            if b > 20:
+                pass
+                # continue
+            print("src:\t\t", s)
+            print("trg:\t\t", r)
+            print("pred:\t\t", c1)
+            print("pred-beam:\t", c2)
 
-                print(f'bleu:\t\t{b:0.2f}')
-                print(f'bleu beam:\t{b_beam:0.2f}')
-                print()
-                torch.cuda.ipc_collect()
-                sleep(wait)
+            print(f'bleu:\t\t{b:0.2f}')
+            print(f'bleu beam:\t{b_beam:0.2f}')
+            print()
+            torch.cuda.ipc_collect()
+            sleep(wait)
 
     def save(self, filename, folder):
         np.save(folder + 'train.npy', self.train_loss)

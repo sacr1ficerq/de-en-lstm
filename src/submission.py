@@ -1,8 +1,8 @@
-import os
+from dataset2 import bucket_iterator
+
 import subprocess
 import torch
-from torch.nn.utils.rnn import pad_sequence
-from torch.utils.data import DataLoader
+
 from tqdm import tqdm
 
 unk_idx, pad_idx, bos_idx, eos_idx = 0, 1, 2, 3
@@ -11,6 +11,8 @@ from time import sleep
 
 from collections import Counter
 import numpy as np
+
+from torch.utils.data import Dataset
 
 def geomean(a):
     a = np.array(a)
@@ -64,13 +66,14 @@ def bleu_from_precision(correct, total, pen, n=4, verbose=False):
                 smooth *= 2
                 precision = 1 / (smooth * total[n])
         pres[n] = precision
-    p = geomean(pres[pres != 0]) 
+    p = geomean(pres[pres != 0]) * 100
 
+    result = pen * p
     if verbose:
-        print(f'sinergy:\t{100*p:0.2f}')
+        print(f'sinergy:\t{p:0.2f}')
         print(f'BP:\t\t{np.round(pen, 3)}')
         print(*np.round(pres*100, 1), sep='/')
-    return pen * p * 100
+    return result, p, pen
 
 def bleu(ref, c, n=4, verbose=False):
     assert isinstance(ref, list)
@@ -98,18 +101,20 @@ def eval_bleu(pred_filename, ref_filename):
 no_unk = set(['<BOS>', '<EOS>', '<PAD>', '<SUB>', '<NUM>'])
 # no_unk = set(['<BOS>', '<EOS>', '<NUM>', '<PAD>'])
 
-def get_bleu(model, dataloader, vocab_trg, vocab_src, raw_dataset, use_beam=False, beam_width=5, n=None, border=0.0, device='cuda'):
+def get_bleu(model, dataset, raw_dataset, vocab_trg, vocab_src, use_beam=False, beam_width=5, n=int(5e2), border=0.0, batch_size=128, device='cuda'):
+    trainset = torch.utils.data.Subset(dataset, range(min(n, len(dataset))))
+    valset = torch.utils.data.Subset(raw_dataset, range(min(n, len(dataset))))
     penalties = 0
     correct = np.zeros(4)
     total = np.zeros(4)
-    if n == None: n = len(raw_dataset)
+    if n == None: n = len(dataset)
     cnt = n
 
     len_ref = 0
     len_pred = 0
 
     with torch.no_grad():
-        for batch_idx, (src, trg) in enumerate(tqdm(dataloader)):
+        for batch_idx, (src, trg) in enumerate(tqdm(bucket_iterator(trainset, batch_size=batch_size, shuffle=False))):
             if cnt == 0:
                 break
             if use_beam:
@@ -119,7 +124,8 @@ def get_bleu(model, dataloader, vocab_trg, vocab_src, raw_dataset, use_beam=Fals
             for i in range(len(src)):
                 if cnt == 0:
                     break
-                ref = raw_dataset[batch_idx * dataloader.batch_size + i]
+                # print(batch_idx * batch_size + i)
+                ref = valset[batch_idx * batch_size + i]
                 # print(vocab_trg.decode(trg[i]), ref)
                 pred_text = vocab_trg.decode(predictions[i], ignore=no_unk, src=ref, vocab_src=vocab_src)
                 penalties += penalty(len(ref), len(pred_text))
@@ -135,12 +141,11 @@ def get_bleu(model, dataloader, vocab_trg, vocab_src, raw_dataset, use_beam=Fals
     print('correct:\t', *map(int, correct))
     print('total:\t\t', *map(int, total))
     bp = penalty(len_ref, len_pred)
-    result = np.round(bleu_from_precision(correct, total, bp, verbose=True), 2)
 
-    return result
+    return np.round(bleu_from_precision(correct, total, bp, verbose=True), 2)
 
 
-def bad_bleu(model, dataloader, vocab_trg, vocab_src, raw_dataset, use_beam=False, beam_width=5, n=None, border=0.0, device='cuda'):
+def bad_bleu(model, dataloader, vocab_trg, vocab_src, raw_dataset, use_beam=False, beam_width=5, n=5e2, border=0.0, device='cuda'):
     src_bad = '../submission/bad_bleu.de'
     trg_bad = '../submission/bad_bleu.en'
     pred_bad = '../submission/bad_bleu_pred.en'
