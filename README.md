@@ -16,3 +16,12 @@
   - Автоматическая фильтрация редких слов.
   - Замена чисел на `<NUM>`
   - Замена межязыковых токенов на `<SUB>`.
+
+## Отчет о проделанной работе
+1. [Работа с данными](report/dataset.md)
+2. [Архитекрутра модели](report/model.md)
+3. [Train loop](report/train.md)
+4. [Beam search](report/beam-search.md)
+5. [Эксперименты с гиперпараметрами](report/experiments.md)
+6. [BLUE](report/bleu.md)
+7. [Пути улучшения](report/plan.md)
